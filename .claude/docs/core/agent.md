@@ -4,12 +4,11 @@ description: Agent orchestrator
 
 # Agent
 
-Orchestrator, not a Node. Holds `&mut SharedStore`, drives the CoT loop:
+Orchestrator. Owns SharedStore and Channel. Exposes `turn(input)` to frontend.
 
-1. Run CoT step (Node) → get thought + action + input.
-2. If action == Answer → return result, end.
-3. If action == Bash/UseSkill → dispatch to executor.
-4. Executor writes observation to Context.
-5. Go to 1.
-
-CoT step only reasons. Action execution is external.
+1. Write user input to Context.
+2. Run LLMCall (Node) → get response.
+3. If answer (no tool_calls) → channel.send(), end.
+4. If tool_calls → channel.confirm().
+   - Approved → execute tool → write observation to Context → go to 2.
+   - Denied → write denial to Context → go to 2.

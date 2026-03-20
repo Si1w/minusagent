@@ -14,20 +14,21 @@ api_key: string
 
 ## Response Format
 
-`thought` + `action` + `input`, all strings.
+Native function calling. No custom JSON.
 
-```json
-{ "thought": "...", "action": "Bash", "input": "ls -la" }
-{ "thought": "...", "action": "UseSkill", "input": "search" }
-{ "thought": "...", "action": "Answer", "input": "the answer" }
-```
+- `content` — thought or final answer.
+- `tool_calls` — action (Bash or Skill).
 
-### Action
+### Flow
 
-- `Bash` — execute shell command, `input` is the command.
-- `UseSkill` — load a skill, `input` is the skill name.
-- `Answer` — final response to user, `input` is the answer.
+- `tool_calls` present → action, `content` is thought.
+- `content` only, no `tool_calls` → final answer.
 
 ### Observation
 
-Set by the environment after action execution, not by LLM.
+`tool` role with `tool_call_id`, set by the environment.
+
+### Tools
+
+- `bash` — execute shell command.
+- `skill` — load and use a skill by name.

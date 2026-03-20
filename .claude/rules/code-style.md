@@ -29,6 +29,29 @@ description: Code style and Rust conventions
 - `mod.rs` only for re-exports, no logic.
 - Group imports: std → external crates → crate internals, separated by blank lines.
 
+## File Layout Order
+
+```rust
+// 1. use statements (grouped as above)
+use std::...;
+
+use external_crate::...;
+
+use crate::...;
+
+// 2. Constants
+
+// 3. Type definitions (structs, enums, type aliases)
+
+// 4. Trait definitions
+
+// 5. Trait implementations (impl Trait for Type)
+
+// 6. Inherent implementations (impl Type)
+
+// 7. Functions
+```
+
 ## Error Handling
 
 - Use `anyhow::Result` for application code.
