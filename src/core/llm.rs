@@ -302,6 +302,7 @@ mod tests {
     use crate::frontend::SilentChannel;
 
     #[tokio::test]
+    #[ignore] // requires LLM_API_KEY
     async fn test_llm_call() {
         dotenvy::dotenv().ok();
 
