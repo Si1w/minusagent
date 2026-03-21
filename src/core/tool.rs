@@ -1,17 +1,22 @@
+use std::path::Path;
+
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::{Value, json};
+use tokio::fs;
 use tokio::process::Command;
 
 use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore};
 
+/// Tool definition for LLM function calling registration
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolDefinition {
     pub r#type: String,
     pub function: ToolFunction,
 }
 
+/// Function schema within a tool definition
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolFunction {
     pub name: String,
@@ -19,6 +24,7 @@ pub struct ToolFunction {
     pub parameters: Value,
 }
 
+/// Execute a shell command and capture output
 pub struct BashExec {
     pub call_id: String,
     pub command: String,
@@ -74,6 +80,146 @@ impl Node for BashExec {
     }
 }
 
+/// Read a file and return line-numbered content
+pub struct ReadFile {
+    pub call_id: String,
+    pub path: String,
+}
+
+impl Node for ReadFile {
+    type PrepRes = String;
+    type ExecRes = String;
+
+    async fn prep(&self, _store: &SharedStore) -> Result<String> {
+        safe_path(&self.path)
+    }
+
+    async fn exec(&self, path: String) -> Result<String> {
+        let content = fs::read_to_string(&path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to read {path}: {e}"))?;
+        // Add line numbers for LLM to reference specific lines
+        let numbered: String = content
+            .lines()
+            .enumerate()
+            .map(|(i, line)| format!("{:4}\t{line}\n", i + 1))
+            .collect();
+        Ok(numbered)
+    }
+
+    async fn post(
+        &self,
+        store: &mut SharedStore,
+        _prep_res: String,
+        exec_res: String,
+    ) -> Result<()> {
+        store.context.history.push(Message {
+            role: Role::Tool,
+            content: Some(exec_res),
+            tool_calls: None,
+            tool_call_id: Some(self.call_id.clone()),
+        });
+        Ok(())
+    }
+}
+
+/// Write content to a file, creating parent directories if needed
+pub struct WriteFile {
+    pub call_id: String,
+    pub path: String,
+    pub content: String,
+}
+
+impl Node for WriteFile {
+    type PrepRes = (String, String);
+    type ExecRes = String;
+
+    async fn prep(&self, _store: &SharedStore) -> Result<(String, String)> {
+        let path = safe_path(&self.path)?;
+        Ok((path, self.content.clone()))
+    }
+
+    async fn exec(&self, prep_res: (String, String)) -> Result<String> {
+        let (path, content) = prep_res;
+        if let Some(parent) = Path::new(&path).parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        fs::write(&path, &content).await?;
+        Ok(format!("Written {} bytes to {path}", content.len()))
+    }
+
+    async fn post(
+        &self,
+        store: &mut SharedStore,
+        _prep_res: (String, String),
+        exec_res: String,
+    ) -> Result<()> {
+        store.context.history.push(Message {
+            role: Role::Tool,
+            content: Some(exec_res),
+            tool_calls: None,
+            tool_call_id: Some(self.call_id.clone()),
+        });
+        Ok(())
+    }
+}
+
+/// Edit a file by replacing a unique string match
+pub struct EditFile {
+    pub call_id: String,
+    pub path: String,
+    pub old_string: String,
+    pub new_string: String,
+}
+
+impl Node for EditFile {
+    type PrepRes = (String, String, String);
+    type ExecRes = String;
+
+    async fn prep(&self, _store: &SharedStore) -> Result<(String, String, String)> {
+        let path = safe_path(&self.path)?;
+        Ok((path, self.old_string.clone(), self.new_string.clone()))
+    }
+
+    async fn exec(&self, prep_res: (String, String, String)) -> Result<String> {
+        let (path, old_string, new_string) = prep_res;
+        let content = fs::read_to_string(&path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to read {path}: {e}"))?;
+
+        let count = content.matches(&old_string).count();
+        if count == 0 {
+            return Err(anyhow::anyhow!("old_string not found in {path}"));
+        }
+        if count > 1 {
+            return Err(anyhow::anyhow!(
+                "old_string found {count} times in {path}, must be unique"
+            ));
+        }
+
+        let new_content = content.replacen(&old_string, &new_string, 1);
+        fs::write(&path, &new_content).await?;
+        Ok(format!("Edited {path}"))
+    }
+
+    async fn post(
+        &self,
+        store: &mut SharedStore,
+        _prep_res: (String, String, String),
+        exec_res: String,
+    ) -> Result<()> {
+        store.context.history.push(Message {
+            role: Role::Tool,
+            content: Some(exec_res),
+            tool_calls: None,
+            tool_call_id: Some(self.call_id.clone()),
+        });
+        Ok(())
+    }
+}
+
+// Tool definitions
+
 pub fn bash_tool() -> ToolDefinition {
     ToolDefinition {
         r#type: "function".into(),
@@ -94,10 +240,113 @@ pub fn bash_tool() -> ToolDefinition {
     }
 }
 
+pub fn read_file_tool() -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: "read_file".into(),
+            description: "Read the contents of a file. Returns line-numbered content.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The file path to read."
+                    }
+                },
+                "required": ["path"]
+            }),
+        },
+    }
+}
+
+pub fn write_file_tool() -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: "write_file".into(),
+            description: "Write content to a file. Creates parent directories if needed."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The file path to write to."
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The content to write."
+                    }
+                },
+                "required": ["path", "content"]
+            }),
+        },
+    }
+}
+
+pub fn edit_file_tool() -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: "edit_file".into(),
+            description: "Edit a file by replacing a unique string with a new string.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The file path to edit."
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": "The exact string to find (must be unique in the file)."
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "The replacement string."
+                    }
+                },
+                "required": ["path", "old_string", "new_string"]
+            }),
+        },
+    }
+}
+
+// Helpers
+
+fn safe_path(raw: &str) -> Result<String> {
+    let workdir = std::env::current_dir()?;
+    let target = workdir.join(raw).canonicalize().or_else(|_| {
+        // File may not exist yet (write); resolve parent instead
+        let p = workdir.join(raw);
+        if let Some(parent) = p.parent() {
+            parent
+                .canonicalize()
+                .map(|resolved| resolved.join(p.file_name().unwrap_or_default()))
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "invalid path",
+            ))
+        }
+    })?;
+
+    let target_str = target.to_string_lossy();
+    let workdir_str = workdir.to_string_lossy();
+    if !target_str.starts_with(workdir_str.as_ref()) {
+        return Err(anyhow::anyhow!(
+            "Path traversal blocked: {raw} resolves outside workdir"
+        ));
+    }
+
+    Ok(target_str.into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::store::{Config, Context, LlmConfig, SystemState};
+    use crate::core::store::{Config, Context, LLMConfig, SystemState};
 
     fn empty_store() -> SharedStore {
         SharedStore {
@@ -107,10 +356,11 @@ mod tests {
             },
             state: SystemState {
                 config: Config {
-                    llm: LlmConfig {
+                    llm: LLMConfig {
                         model: String::new(),
                         base_url: String::new(),
                         api_key: String::new(),
+                        context_window: 256_000,
                     },
                 },
             },

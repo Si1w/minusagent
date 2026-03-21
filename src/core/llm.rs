@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore, ToolCall};
-use crate::core::tool::{ToolDefinition, bash_tool};
+use crate::core::tool::{
+    ToolDefinition, bash_tool, edit_file_tool, read_file_tool, write_file_tool,
+};
 use crate::frontend::Channel;
 
 // Request types
@@ -59,12 +61,24 @@ pub struct LLMRequest {
     body: LLMRequestBody,
 }
 
+/// Token usage from the LLM API response
+#[derive(Debug, Clone)]
+pub struct Usage {
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+    pub total_tokens: usize,
+}
+
+/// Aggregated LLM response after streaming
 #[derive(Debug, Clone)]
 pub struct LLMResponse {
     pub content: Option<String>,
     pub tool_calls: Option<Vec<ResponseToolCall>>,
+    /// Token usage from the final streaming chunk, `None` if unavailable
+    pub usage: Option<Usage>,
 }
 
+/// A tool call parsed from the LLM response
 #[derive(Debug, Clone)]
 pub struct ResponseToolCall {
     pub id: String,
@@ -75,8 +89,16 @@ pub struct ResponseToolCall {
 // Streaming delta types
 
 #[derive(Debug, Deserialize)]
+struct StreamUsage {
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    total_tokens: usize,
+}
+
+#[derive(Debug, Deserialize)]
 struct StreamChunk {
     choices: Vec<StreamChoice>,
+    usage: Option<StreamUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,6 +125,7 @@ struct StreamFunction {
     arguments: Option<String>,
 }
 
+/// Node that calls an OpenAI-compatible LLM API with streaming
 pub struct LLMCall {
     pub channel: Arc<dyn Channel>,
 }
@@ -147,7 +170,7 @@ impl Node for LLMCall {
             });
         }
 
-        let tools = vec![bash_tool()];
+        let tools = vec![bash_tool(), read_file_tool(), write_file_tool(), edit_file_tool()];
 
         Ok(LLMRequest {
             url: format!(
@@ -176,6 +199,7 @@ impl Node for LLMCall {
 
         let mut content = String::new();
         let mut tool_calls: Vec<ResponseToolCall> = Vec::new();
+        let mut usage: Option<Usage> = None;
         let mut buf = String::new();
 
         let mut stream = resp.bytes_stream();
@@ -200,6 +224,14 @@ impl Node for LLMCall {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
+
+                if let Some(u) = chunk.usage {
+                    usage = Some(Usage {
+                        prompt_tokens: u.prompt_tokens,
+                        completion_tokens: u.completion_tokens,
+                        total_tokens: u.total_tokens,
+                    });
+                }
 
                 let Some(choice) = chunk.choices.into_iter().next() else {
                     continue;
@@ -235,6 +267,7 @@ impl Node for LLMCall {
         Ok(LLMResponse {
             content: if content.is_empty() { None } else { Some(content) },
             tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+            usage,
         })
     }
 
@@ -265,7 +298,7 @@ impl Node for LLMCall {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::store::{Config, Context, LlmConfig, SystemState};
+    use crate::core::store::{Config, Context, LLMConfig, SystemState};
     use crate::frontend::cli::Cli;
 
     #[tokio::test]
@@ -284,10 +317,11 @@ mod tests {
             },
             state: SystemState {
                 config: Config {
-                    llm: LlmConfig {
+                    llm: LLMConfig {
                         model: std::env::var("LLM_MODEL").expect("LLM_MODEL not set"),
                         base_url: std::env::var("LLM_BASE_URL").expect("LLM_BASE_URL not set"),
                         api_key: std::env::var("LLM_API_KEY").expect("LLM_API_KEY not set"),
+                        context_window: 256_000,
                     },
                 },
             },

@@ -1,8 +1,14 @@
+use serde::{Deserialize, Serialize};
+
+/// LLM-visible conversation state
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Context {
     pub system_prompt: String,
     pub history: Vec<Message>,
 }
 
+/// A single message in the conversation history
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: Option<String>,
@@ -10,32 +16,44 @@ pub struct Message {
     pub tool_call_id: Option<String>,
 }
 
+/// Message author role
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Role {
     User,
     Assistant,
     Tool,
 }
 
+/// A tool invocation requested by the LLM
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: String,
 }
 
-pub struct LlmConfig {
+/// LLM provider configuration
+pub struct LLMConfig {
     pub model: String,
     pub base_url: String,
     pub api_key: String,
+    pub context_window: usize,
 }
 
+/// Top-level configuration
 pub struct Config {
-    pub llm: LlmConfig,
+    pub llm: LLMConfig,
 }
 
+/// LLM-invisible system state
 pub struct SystemState {
     pub config: Config,
 }
 
+/// Two-layer state container shared across all nodes
+///
+/// - `context`: LLM-visible (system prompt, conversation history)
+/// - `state`: LLM-invisible (config, runtime state)
 pub struct SharedStore {
     pub context: Context,
     pub state: SystemState,
