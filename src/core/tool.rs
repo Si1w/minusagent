@@ -400,4 +400,101 @@ mod tests {
         let result = node.prep(&store).await;
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn test_write_and_read_file() {
+        let mut store = empty_store();
+        let test_path = "test_rw_output.txt";
+
+        // Write
+        let write_node = WriteFile {
+            call_id: "w1".into(),
+            path: test_path.into(),
+            content: "hello world".into(),
+        };
+        write_node.run(&mut store).await.expect("write failed");
+        let last = store.context.history.last().unwrap();
+        assert!(last.content.as_ref().unwrap().contains("Written"));
+
+        // Read
+        let read_node = ReadFile {
+            call_id: "r1".into(),
+            path: test_path.into(),
+        };
+        read_node.run(&mut store).await.expect("read failed");
+        let last = store.context.history.last().unwrap();
+        assert!(last.content.as_ref().unwrap().contains("hello world"));
+
+        // Cleanup
+        std::fs::remove_file(test_path).ok();
+    }
+
+    #[tokio::test]
+    async fn test_edit_file() {
+        let mut store = empty_store();
+        let test_path = "test_edit_output.txt";
+        std::fs::write(test_path, "foo bar baz").unwrap();
+
+        let node = EditFile {
+            call_id: "e1".into(),
+            path: test_path.into(),
+            old_string: "bar".into(),
+            new_string: "qux".into(),
+        };
+        node.run(&mut store).await.expect("edit failed");
+
+        let content = std::fs::read_to_string(test_path).unwrap();
+        assert_eq!(content, "foo qux baz");
+
+        std::fs::remove_file(test_path).ok();
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_string_not_found() {
+        let test_path = "test_edit_notfound.txt";
+        std::fs::write(test_path, "some content").unwrap();
+
+        let node = EditFile {
+            call_id: "e2".into(),
+            path: test_path.into(),
+            old_string: "nonexistent".into(),
+            new_string: "replacement".into(),
+        };
+        let result = node.run(&mut empty_store()).await;
+        assert!(result.is_err());
+
+        std::fs::remove_file(test_path).ok();
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_not_unique() {
+        let test_path = "test_edit_dup.txt";
+        std::fs::write(test_path, "aaa aaa").unwrap();
+
+        let node = EditFile {
+            call_id: "e3".into(),
+            path: test_path.into(),
+            old_string: "aaa".into(),
+            new_string: "bbb".into(),
+        };
+        let result = node.run(&mut empty_store()).await;
+        assert!(result.is_err());
+
+        std::fs::remove_file(test_path).ok();
+    }
+
+    #[test]
+    fn test_safe_path_blocks_traversal() {
+        let result = safe_path("../../etc/passwd");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_safe_path_allows_relative() {
+        // A file within the workdir should be allowed
+        std::fs::write("test_safe_path.txt", "").unwrap();
+        let result = safe_path("test_safe_path.txt");
+        assert!(result.is_ok());
+        std::fs::remove_file("test_safe_path.txt").ok();
+    }
 }

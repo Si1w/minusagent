@@ -408,3 +408,104 @@ impl Session {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_message(role: Role, content: &str) -> Message {
+        Message {
+            role,
+            content: Some(content.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn test_session_store_create_and_list() {
+        let mut store = SessionStore::new().unwrap();
+        let id = store.create("test-label").unwrap();
+
+        assert_eq!(store.current_id.as_deref(), Some(id.as_str()));
+
+        let sessions = store.list();
+        assert!(sessions.iter().any(|(sid, meta)| {
+            sid == &id && meta.label == "test-label"
+        }));
+
+        // Cleanup
+        std::fs::remove_file(
+            Path::new(SESSIONS_DIR).join(format!("{id}.jsonl")),
+        ).ok();
+        store.index.remove(&id);
+        store.save_index().ok();
+    }
+
+    #[test]
+    fn test_session_store_save_and_load() {
+        let mut store = SessionStore::new().unwrap();
+        let id = store.create("save-load-test").unwrap();
+
+        let history = vec![
+            test_message(Role::User, "hello"),
+            test_message(Role::Assistant, "hi there"),
+        ];
+
+        store.save(&history).unwrap();
+
+        // Reload
+        let loaded = store.load(&id).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(
+            loaded[0].content.as_deref(),
+            Some("hello"),
+        );
+        assert_eq!(
+            loaded[1].content.as_deref(),
+            Some("hi there"),
+        );
+
+        // Cleanup
+        std::fs::remove_file(
+            Path::new(SESSIONS_DIR).join(format!("{id}.jsonl")),
+        ).ok();
+        store.index.remove(&id);
+        store.save_index().ok();
+    }
+
+    #[test]
+    fn test_session_store_save_no_active_session() {
+        let mut store = SessionStore::new().unwrap();
+        let result = store.save(&[]);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("No active session")
+        );
+    }
+
+    #[test]
+    fn test_session_store_load_not_found() {
+        let mut store = SessionStore::new().unwrap();
+        let result = store.load("nonexistent_id_12345");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_session_store_prefix_match() {
+        let mut store = SessionStore::new().unwrap();
+        let id = store.create("prefix-test").unwrap();
+
+        // Prefix match should work
+        let prefix = &id[..4];
+        let loaded = store.load(prefix).unwrap();
+        assert!(loaded.is_empty()); // No data saved yet, just verifying match works
+
+        // Cleanup
+        std::fs::remove_file(
+            Path::new(SESSIONS_DIR).join(format!("{id}.jsonl")),
+        ).ok();
+        store.index.remove(&id);
+        store.save_index().ok();
+    }
+}

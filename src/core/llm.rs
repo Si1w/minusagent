@@ -299,7 +299,7 @@ impl Node for LLMCall {
 mod tests {
     use super::*;
     use crate::core::store::{Config, Context, LLMConfig, SystemState};
-    use crate::frontend::cli::Cli;
+    use crate::frontend::SilentChannel;
 
     #[tokio::test]
     async fn test_llm_call() {
@@ -328,7 +328,7 @@ mod tests {
         };
 
         let node = LLMCall {
-            channel: Arc::new(Cli) as Arc<dyn Channel>,
+            channel: Arc::new(SilentChannel) as Arc<dyn Channel>,
         };
 
         let prep_res = node.prep(&store).await.expect("prep failed");
