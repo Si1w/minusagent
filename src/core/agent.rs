@@ -5,32 +5,47 @@ use anyhow::Result;
 use crate::core::llm::LLMCall;
 use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore};
-use crate::core::tool::BashExec;
+use crate::core::tool::{BashExec, EditFile, ReadFile, WriteFile};
 use crate::frontend::Channel;
 
+/// Chain-of-thought agent
+///
+/// Drives the LLM loop: call LLM → dispatch tool calls → repeat until done.
+/// Does not own SharedStore — receives it by reference from Session.
 pub struct Agent {
-    store: SharedStore,
     channel: Arc<dyn Channel>,
 }
 
 impl Agent {
-    pub fn new(store: SharedStore, channel: Arc<dyn Channel>) -> Self {
-        Self { store, channel }
+    pub fn new(channel: Arc<dyn Channel>) -> Self {
+        Self { channel }
     }
 
-    pub async fn turn(&mut self, input: &str) -> Result<()> {
-        self.store.context.history.push(Message {
-            role: Role::User,
-            content: Some(input.to_string()),
-            tool_calls: None,
-            tool_call_id: None,
-        });
+    /// Run the CoT loop against the given store
+    ///
+    /// # Returns
+    ///
+    /// The `prompt_tokens` from the last LLM call, if available.
+    /// Session uses this to decide whether to compact.
+    ///
+    /// # Errors
+    ///
+    /// Returns error on LLM call failure or tool execution failure.
+    pub async fn run(
+        &self,
+        store: &mut SharedStore,
+    ) -> Result<Option<usize>> {
+        let mut last_prompt_tokens = None;
 
         loop {
             let llm = LLMCall {
                 channel: self.channel.clone(),
             };
-            let response = llm.run(&mut self.store).await?;
+            let response = llm.run(store).await?;
+
+            if let Some(usage) = &response.usage {
+                last_prompt_tokens = Some(usage.prompt_tokens);
+            }
 
             match response.tool_calls {
                 Some(tool_calls) => {
@@ -45,9 +60,11 @@ impl Agent {
                                     .to_string();
 
                                 if !self.channel.confirm(&command).await {
-                                    self.store.context.history.push(Message {
+                                    store.context.history.push(Message {
                                         role: Role::Tool,
-                                        content: Some("User denied execution.".into()),
+                                        content: Some(
+                                            "User denied execution.".into(),
+                                        ),
                                         tool_calls: None,
                                         tool_call_id: Some(tc.id.clone()),
                                     });
@@ -58,11 +75,64 @@ impl Agent {
                                     call_id: tc.id,
                                     command,
                                 };
-                                bash.run(&mut self.store).await?;
+                                bash.run(store).await?;
+                            }
+                            "read_file" => {
+                                let args: serde_json::Value =
+                                    serde_json::from_str(&tc.arguments)?;
+                                let path = args["path"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_string();
+                                let node = ReadFile {
+                                    call_id: tc.id,
+                                    path,
+                                };
+                                node.run(store).await?;
+                            }
+                            "write_file" => {
+                                let args: serde_json::Value =
+                                    serde_json::from_str(&tc.arguments)?;
+                                let path = args["path"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_string();
+                                let content = args["content"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_string();
+                                let node = WriteFile {
+                                    call_id: tc.id,
+                                    path,
+                                    content,
+                                };
+                                node.run(store).await?;
+                            }
+                            "edit_file" => {
+                                let args: serde_json::Value =
+                                    serde_json::from_str(&tc.arguments)?;
+                                let path = args["path"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_string();
+                                let old_string = args["old_string"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_string();
+                                let new_string = args["new_string"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_string();
+                                let node = EditFile {
+                                    call_id: tc.id,
+                                    path,
+                                    old_string,
+                                    new_string,
+                                };
+                                node.run(store).await?;
                             }
                             _ => {
-                                // TODO: skill execution
-                                self.store.context.history.push(Message {
+                                store.context.history.push(Message {
                                     role: Role::Tool,
                                     content: Some(format!(
                                         "Unknown tool: {}",
@@ -82,6 +152,6 @@ impl Agent {
             }
         }
 
-        Ok(())
+        Ok(last_prompt_tokens)
     }
 }

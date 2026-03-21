@@ -58,6 +58,35 @@ use crate::...;
 - Use `thiserror` for library/domain errors that callers need to match on.
 - No `.unwrap()` in non-test code.
 
+## Documentation
+
+- `///` for all pub items (structs, enums, traits, functions, methods).
+- No doc comments on private items — use `//` sparingly if needed.
+
+```rust
+/// Load session history from a JSONL file
+///
+/// # Arguments
+///
+/// * `id` - Session ID or unique prefix
+///
+/// # Returns
+///
+/// The reconstructed message history. Returns empty `Vec` if file does not exist.
+///
+/// # Errors
+///
+/// Returns error if `id` matches zero or multiple sessions, or if JSONL is malformed.
+pub fn load(&mut self, id: &str) -> Result<Vec<Message>> {
+```
+
+- First line: concise summary.
+- `# Arguments`: list each param with `* \`name\` - description`.
+- `# Returns`: describe the return value.
+- `# Errors`: when returning `Result`, describe failure cases.
+- `# Examples`: only when usage is non-obvious.
+- Omit sections that add no value (e.g. skip `# Arguments` for zero-arg methods).
+
 ## Patterns
 
 - Prefer `impl Trait` over `dyn Trait` when possible.
