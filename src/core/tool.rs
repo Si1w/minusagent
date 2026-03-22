@@ -6,8 +6,11 @@ use serde_json::{Value, json};
 use tokio::fs;
 use tokio::process::Command;
 
+use std::sync::Arc;
+
 use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore};
+use crate::frontend::Channel;
 
 /// Tool definition for LLM function calling registration
 #[derive(Debug, Clone, Serialize)]
@@ -311,6 +314,104 @@ pub fn edit_file_tool() -> ToolDefinition {
             }),
         },
     }
+}
+
+/// All built-in tool definitions for LLM registration
+pub fn all_tools() -> Vec<ToolDefinition> {
+    vec![bash_tool(), read_file_tool(), write_file_tool(), edit_file_tool()]
+}
+
+/// Dispatch a tool call by name
+///
+/// # Arguments
+///
+/// * `name` - Tool name from LLM response
+/// * `call_id` - Unique tool call ID
+/// * `arguments` - JSON string of tool arguments
+/// * `store` - Shared store for reading/writing context
+/// * `channel` - Channel for user confirmation (bash only)
+///
+/// # Returns
+///
+/// `true` if the tool was found and executed, `false` if unknown.
+///
+/// # Errors
+///
+/// Returns error on argument parsing or tool execution failure.
+pub async fn dispatch_tool(
+    name: &str,
+    call_id: String,
+    arguments: &str,
+    store: &mut SharedStore,
+    channel: &Arc<dyn Channel>,
+) -> Result<bool> {
+    let args: serde_json::Value = serde_json::from_str(arguments)?;
+
+    match name {
+        "bash" => {
+            let command = args["command"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+
+            if !channel.confirm(&command).await {
+                store.context.history.push(Message {
+                    role: Role::Tool,
+                    content: Some("User denied execution.".into()),
+                    tool_calls: None,
+                    tool_call_id: Some(call_id),
+                });
+                return Ok(true);
+            }
+
+            let node = BashExec { call_id, command };
+            node.run(store).await?;
+        }
+        "read_file" => {
+            let path = args["path"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let node = ReadFile { call_id, path };
+            node.run(store).await?;
+        }
+        "write_file" => {
+            let path = args["path"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let content = args["content"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let node = WriteFile { call_id, path, content };
+            node.run(store).await?;
+        }
+        "edit_file" => {
+            let path = args["path"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let old_string = args["old_string"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let new_string = args["new_string"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let node = EditFile {
+                call_id,
+                path,
+                old_string,
+                new_string,
+            };
+            node.run(store).await?;
+        }
+        _ => return Ok(false),
+    }
+
+    Ok(true)
 }
 
 // Helpers

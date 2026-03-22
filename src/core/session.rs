@@ -175,25 +175,29 @@ impl SessionStore {
 ///
 /// Manages user turns, persistence, and `/` commands.
 /// Delegates CoT reasoning to Agent.
+/// Does not own a Channel — receives one per turn.
 pub struct Session {
     store: SharedStore,
     session_store: SessionStore,
     agent: Agent,
-    channel: Arc<dyn Channel>,
 }
 
 impl Session {
     /// Create a new session orchestrator
-    pub fn new(store: SharedStore, channel: Arc<dyn Channel>) -> Result<Self> {
+    pub fn new(store: SharedStore) -> Result<Self> {
         let session_store = SessionStore::new()?;
-        let agent = Agent::new(channel.clone());
-        Ok(Self { store, session_store, agent, channel })
+        let agent = Agent::new();
+        Ok(Self { store, session_store, agent })
     }
 
     /// Handle one user input: dispatch `/` commands or run agent turn
-    pub async fn turn(&mut self, input: &str) -> Result<()> {
+    pub async fn turn(
+        &mut self,
+        input: &str,
+        channel: &Arc<dyn Channel>,
+    ) -> Result<()> {
         if input.starts_with('/') {
-            return self.handle_command(input).await;
+            return self.handle_command(input, channel).await;
         }
 
         self.store.context.history.push(Message {
@@ -203,15 +207,16 @@ impl Session {
             tool_call_id: None,
         });
 
-        let prompt_tokens = self.agent.run(&mut self.store).await?;
+        let total_tokens =
+            self.agent.run(&mut self.store, channel).await?;
 
         // Check if compaction is needed
         let context_window = self.store.state.config.llm.context_window;
-        if let Some(tokens) = prompt_tokens {
+        if let Some(tokens) = total_tokens {
             let threshold =
                 (context_window as f64 * COMPACT_THRESHOLD) as usize;
             if tokens > threshold {
-                self.channel
+                channel
                     .send("[guard] Approaching context limit, compacting...")
                     .await;
                 self.compact().await?;
@@ -240,7 +245,6 @@ impl Session {
             return Ok(());
         }
 
-        // Serialize old messages for summarization
         let old_messages = &self.store.context.history[..compress_count];
         let mut old_text = String::new();
         for msg in old_messages {
@@ -260,7 +264,6 @@ impl Session {
              Output only the summary, no preamble.\n\n{old_text}"
         );
 
-        // Temporarily swap store for summarization LLM call
         let original_history =
             std::mem::take(&mut self.store.context.history);
         let original_prompt = self.store.context.system_prompt.clone();
@@ -280,20 +283,17 @@ impl Session {
         };
         let response = llm.run(&mut self.store).await;
 
-        // Restore original prompt
         self.store.context.system_prompt = original_prompt;
 
         let summary_text = match response {
             Ok(resp) => resp.content.unwrap_or_default(),
             Err(_) => {
-                // Summarization failed, just drop old messages
                 self.store.context.history =
                     original_history[compress_count..].to_vec();
                 return Ok(());
             }
         };
 
-        // Build compacted history
         let mut compacted = vec![
             Message {
                 role: Role::User,
@@ -320,7 +320,11 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_command(&mut self, input: &str) -> Result<()> {
+    async fn handle_command(
+        &mut self,
+        input: &str,
+        channel: &Arc<dyn Channel>,
+    ) -> Result<()> {
         let parts: Vec<&str> = input.splitn(2, ' ').collect();
         let cmd = parts[0];
         let arg = parts.get(1).unwrap_or(&"").trim();
@@ -329,23 +333,23 @@ impl Session {
             "/new" => {
                 let id = self.session_store.create(arg)?;
                 self.store.context.history.clear();
-                self.channel.send(&format!("Created session: {id}")).await;
+                channel.send(&format!("Created session: {id}")).await;
             }
             "/save" => {
                 self.session_store.save(&self.store.context.history)?;
                 let id = self.session_store.current_id.as_deref()
                     .unwrap_or("none");
-                self.channel.send(&format!("Saved session: {id}")).await;
+                channel.send(&format!("Saved session: {id}")).await;
             }
             "/load" => {
                 if arg.is_empty() {
-                    self.channel.send("Usage: /load <session_id>").await;
+                    channel.send("Usage: /load <session_id>").await;
                     return Ok(());
                 }
                 let history = self.session_store.load(arg)?;
                 let id = self.session_store.current_id.as_deref()
                     .unwrap_or("none");
-                self.channel
+                channel
                     .send(&format!(
                         "Loaded session: {id} ({} messages)",
                         history.len()
@@ -356,7 +360,7 @@ impl Session {
             "/list" => {
                 let sessions = self.session_store.list();
                 if sessions.is_empty() {
-                    self.channel.send("No sessions found.").await;
+                    channel.send("No sessions found.").await;
                 } else {
                     let mut output = String::from("Sessions:\n");
                     for (id, meta) in &sessions {
@@ -379,19 +383,19 @@ impl Session {
                             &meta.last_active[..19],
                         ));
                     }
-                    self.channel.send(&output).await;
+                    channel.send(&output).await;
                 }
             }
             "/compact" => {
                 if self.store.context.history.len() <= 4 {
-                    self.channel
+                    channel
                         .send("Too few messages to compact.")
                         .await;
                 } else {
                     let before = self.store.context.history.len();
                     self.compact().await?;
                     let after = self.store.context.history.len();
-                    self.channel
+                    channel
                         .send(&format!(
                             "Compacted: {before} -> {after} messages"
                         ))
@@ -399,7 +403,7 @@ impl Session {
                 }
             }
             _ => {
-                self.channel
+                channel
                     .send(&format!("Unknown command: {cmd}"))
                     .await;
             }
@@ -434,7 +438,6 @@ mod tests {
             sid == &id && meta.label == "test-label"
         }));
 
-        // Cleanup
         std::fs::remove_file(
             Path::new(SESSIONS_DIR).join(format!("{id}.jsonl")),
         ).ok();
@@ -454,19 +457,11 @@ mod tests {
 
         store.save(&history).unwrap();
 
-        // Reload
         let loaded = store.load(&id).unwrap();
         assert_eq!(loaded.len(), 2);
-        assert_eq!(
-            loaded[0].content.as_deref(),
-            Some("hello"),
-        );
-        assert_eq!(
-            loaded[1].content.as_deref(),
-            Some("hi there"),
-        );
+        assert_eq!(loaded[0].content.as_deref(), Some("hello"));
+        assert_eq!(loaded[1].content.as_deref(), Some("hi there"));
 
-        // Cleanup
         std::fs::remove_file(
             Path::new(SESSIONS_DIR).join(format!("{id}.jsonl")),
         ).ok();
@@ -496,12 +491,10 @@ mod tests {
         let mut store = SessionStore::new().unwrap();
         let id = store.create("prefix-test").unwrap();
 
-        // Prefix match should work
         let prefix = &id[..4];
         let loaded = store.load(prefix).unwrap();
-        assert!(loaded.is_empty()); // No data saved yet, just verifying match works
+        assert!(loaded.is_empty());
 
-        // Cleanup
         std::fs::remove_file(
             Path::new(SESSIONS_DIR).join(format!("{id}.jsonl")),
         ).ok();

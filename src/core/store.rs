@@ -17,7 +17,7 @@ pub struct Message {
 }
 
 /// Message author role
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Role {
     User,
     Assistant,
