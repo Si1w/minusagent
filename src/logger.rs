@@ -44,10 +44,12 @@ impl TuiLogger {
 
     /// Drain all buffered log entries
     pub fn drain() -> Vec<LogEntry> {
-        if let Some(buf) = LOG_BUFFER.get() {
-            std::mem::take(&mut *buf.lock().unwrap())
-        } else {
-            Vec::new()
+        let Some(buf) = LOG_BUFFER.get() else {
+            return Vec::new();
+        };
+        match buf.lock() {
+            Ok(mut buf) => std::mem::take(&mut *buf),
+            Err(_) => Vec::new(),
         }
     }
 }

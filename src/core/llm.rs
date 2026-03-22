@@ -127,6 +127,7 @@ struct StreamFunction {
 /// Node that calls an OpenAI-compatible LLM API with streaming
 pub struct LLMCall {
     pub channel: Arc<dyn Channel>,
+    pub http: reqwest::Client,
 }
 
 impl Node for LLMCall {
@@ -187,8 +188,7 @@ impl Node for LLMCall {
     }
 
     async fn exec(&self, prep_res: LLMRequest) -> Result<LLMResponse> {
-        let client = reqwest::Client::new();
-        let resp = client
+        let resp = self.http
             .post(&prep_res.url)
             .bearer_auth(&prep_res.api_key)
             .json(&prep_res.body)
@@ -330,6 +330,7 @@ mod tests {
 
         let node = LLMCall {
             channel: Arc::new(SilentChannel) as Arc<dyn Channel>,
+            http: reqwest::Client::new(),
         };
 
         let prep_res = node.prep(&store).await.expect("prep failed");

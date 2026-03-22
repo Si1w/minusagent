@@ -38,13 +38,15 @@ impl Agent {
         &self,
         store: &mut SharedStore,
         channel: &Arc<dyn Channel>,
+        http: &reqwest::Client,
     ) -> Result<Option<usize>> {
         let mut last_total_tokens = None;
+        let llm = LLMCall {
+            channel: channel.clone(),
+            http: http.clone(),
+        };
 
         loop {
-            let llm = LLMCall {
-                channel: channel.clone(),
-            };
             let response = llm.run(store).await?;
 
             if let Some(usage) = &response.usage {
@@ -77,7 +79,7 @@ impl Agent {
                     }
                 }
                 None => {
-                    channel.send("").await;
+                    channel.flush().await;
                     break;
                 }
             }

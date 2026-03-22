@@ -180,6 +180,7 @@ pub struct Session {
     store: SharedStore,
     session_store: SessionStore,
     agent: Agent,
+    http: reqwest::Client,
 }
 
 impl Session {
@@ -187,7 +188,8 @@ impl Session {
     pub fn new(store: SharedStore) -> Result<Self> {
         let session_store = SessionStore::new()?;
         let agent = Agent::new();
-        Ok(Self { store, session_store, agent })
+        let http = reqwest::Client::new();
+        Ok(Self { store, session_store, agent, http })
     }
 
     /// Handle one user input: dispatch `/` commands or run agent turn
@@ -208,7 +210,7 @@ impl Session {
         });
 
         let total_tokens =
-            self.agent.run(&mut self.store, channel).await?;
+            self.agent.run(&mut self.store, channel, &self.http).await?;
 
         // Check if compaction is needed
         let context_window = self.store.state.config.llm.context_window;
@@ -280,6 +282,7 @@ impl Session {
 
         let llm = LLMCall {
             channel: Arc::new(SilentChannel),
+            http: self.http.clone(),
         };
         let response = llm.run(&mut self.store).await;
 

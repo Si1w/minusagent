@@ -283,4 +283,13 @@ impl Channel for Cli {
         state.output.push_str(chunk);
         state.auto_scroll = true;
     }
+
+    async fn flush(&self) {
+        let mut state = self.state.lock().await;
+        if !state.output.ends_with('\n') {
+            state.output.push('\n');
+        }
+        state.output.push('\n');
+        state.auto_scroll = true;
+    }
 }
