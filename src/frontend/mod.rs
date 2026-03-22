@@ -1,4 +1,6 @@
 pub mod cli;
+pub mod discord;
+pub mod utils;
 
 /// A message received from the user
 pub struct UserMessage {

@@ -6,9 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore, ToolCall};
-use crate::core::tool::{
-    ToolDefinition, bash_tool, edit_file_tool, read_file_tool, write_file_tool,
-};
+use crate::core::tool::{ToolDefinition, all_tools};
 use crate::frontend::Channel;
 
 // Request types
@@ -170,7 +168,7 @@ impl Node for LLMCall {
             });
         }
 
-        let tools = vec![bash_tool(), read_file_tool(), write_file_tool(), edit_file_tool()];
+        let tools = all_tools();
 
         Ok(LLMRequest {
             url: format!(
@@ -201,6 +199,7 @@ impl Node for LLMCall {
         let mut tool_calls: Vec<ResponseToolCall> = Vec::new();
         let mut usage: Option<Usage> = None;
         let mut buf = String::new();
+        let mut thinking_shown = false;
 
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
@@ -238,7 +237,13 @@ impl Node for LLMCall {
                 };
 
                 if let Some(text) = choice.delta.content {
-                    self.channel.on_stream_chunk(&text).await;
+                    if !text.is_empty() {
+                        if !thinking_shown {
+                            self.channel.on_stream_chunk("[Think]\n").await;
+                            thinking_shown = true;
+                        }
+                        self.channel.on_stream_chunk(&text).await;
+                    }
                     content.push_str(&text);
                 }
 
