@@ -8,16 +8,6 @@ use crate::core::store::{Message, Role, SharedStore};
 use crate::core::tool::dispatch_tool;
 use crate::frontend::Channel;
 
-fn truncate_result(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().take(3).collect();
-    let short = lines.join("\n");
-    if text.lines().count() > 3 {
-        format!("{short}\n...")
-    } else {
-        short
-    }
-}
-
 /// Chain-of-thought agent
 ///
 /// Drives the LLM loop: call LLM → dispatch tool calls → repeat until done.
@@ -49,7 +39,7 @@ impl Agent {
         store: &mut SharedStore,
         channel: &Arc<dyn Channel>,
     ) -> Result<Option<usize>> {
-        let mut last_prompt_tokens = None;
+        let mut last_total_tokens = None;
 
         loop {
             let llm = LLMCall {
@@ -58,13 +48,12 @@ impl Agent {
             let response = llm.run(store).await?;
 
             if let Some(usage) = &response.usage {
-                last_prompt_tokens = Some(usage.prompt_tokens);
+                last_total_tokens = Some(usage.total_tokens);
             }
 
             match response.tool_calls {
                 Some(tool_calls) => {
                     for tc in tool_calls {
-                        let tool_name = tc.name.clone();
                         let handled = dispatch_tool(
                             &tc.name,
                             tc.id.clone(),
@@ -85,23 +74,6 @@ impl Agent {
                                 tool_call_id: Some(tc.id),
                             });
                         }
-
-                        // Display tool result summary
-                        if let Some(last) = store.context.history.last()
-                        {
-                            if last.role == Role::Tool {
-                                let result = last
-                                    .content
-                                    .as_deref()
-                                    .unwrap_or("");
-                                channel
-                                    .send(&format!(
-                                        "[{tool_name}] {}",
-                                        truncate_result(result)
-                                    ))
-                                    .await;
-                            }
-                        }
                     }
                 }
                 None => {
@@ -111,6 +83,6 @@ impl Agent {
             }
         }
 
-        Ok(last_prompt_tokens)
+        Ok(last_total_tokens)
     }
 }

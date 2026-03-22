@@ -5,6 +5,7 @@ use tokio::sync::{mpsc, oneshot};
 
 mod core;
 mod frontend;
+mod logger;
 
 use crate::core::session::Session;
 use crate::core::store::{Config, Context, LLMConfig, SharedStore, SystemState};
@@ -50,10 +51,7 @@ fn build_store() -> SharedStore {
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
-    )
-    .init();
+    logger::TuiLogger::init();
 
     let (tx, mut rx) = mpsc::channel::<RoutedMessage>(32);
 
@@ -73,6 +71,7 @@ async fn main() {
             };
 
             if msg.text == "/exit" {
+                frontend::cli::cleanup_terminal();
                 std::process::exit(0);
             }
 

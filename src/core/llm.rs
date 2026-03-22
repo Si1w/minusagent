@@ -61,6 +61,7 @@ pub struct LLMRequest {
 
 /// Token usage from the LLM API response
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Usage {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
@@ -199,8 +200,6 @@ impl Node for LLMCall {
         let mut tool_calls: Vec<ResponseToolCall> = Vec::new();
         let mut usage: Option<Usage> = None;
         let mut buf = String::new();
-        let mut thinking_shown = false;
-
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
@@ -238,10 +237,6 @@ impl Node for LLMCall {
 
                 if let Some(text) = choice.delta.content {
                     if !text.is_empty() {
-                        if !thinking_shown {
-                            self.channel.on_stream_chunk("[Think]\n").await;
-                            thinking_shown = true;
-                        }
                         self.channel.on_stream_chunk(&text).await;
                     }
                     content.push_str(&text);

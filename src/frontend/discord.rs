@@ -105,7 +105,7 @@ impl Channel for DiscordReply {
             if text.is_empty() {
                 combined
             } else {
-                format!("{combined}\n\n\n{text}")
+                format!("{combined}\n\n{text}")
             }
         };
         drop(buf);

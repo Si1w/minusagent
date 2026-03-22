@@ -207,12 +207,12 @@ impl Session {
             tool_call_id: None,
         });
 
-        let prompt_tokens =
+        let total_tokens =
             self.agent.run(&mut self.store, channel).await?;
 
         // Check if compaction is needed
         let context_window = self.store.state.config.llm.context_window;
-        if let Some(tokens) = prompt_tokens {
+        if let Some(tokens) = total_tokens {
             let threshold =
                 (context_window as f64 * COMPACT_THRESHOLD) as usize;
             if tokens > threshold {
