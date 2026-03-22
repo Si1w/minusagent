@@ -9,7 +9,7 @@ Top-level container for all shared state.
 ```
 SharedStore
 ├── Context      — LLM-visible state
-└── SystemState  — LLM-invisible (config, inter-Node data)
+└── SystemState  — LLM-invisible (config)
 ```
 
 - Node `prep` reads `&SharedStore`.
@@ -18,11 +18,10 @@ SharedStore
 # Context
 
 Everything the LLM can see:
-- System prompt
-- Conversation history (user, assistant, observation)
+- `system_prompt` — loaded from `prompts/system.md`
+- `history` — Vec<Message> (role: User/Assistant/Tool, content, tool_calls, tool_call_id)
 
 # SystemState
 
 Internal data, LLM does not see this:
-- Config (model, base_url, api_key)
-- Inter-Node communication data
+- `Config` containing `LLMConfig` (model, base_url, api_key, context_window)

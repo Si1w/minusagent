@@ -8,16 +8,21 @@ Smallest building block. Every operation is a Node: `prep → exec → post`.
 
 ## Prep
 
-- Read from `SharedStore`, return `prep_res`.
-- `prep_res` is passed to both `exec()` and `post()`.
+- Read from `&SharedStore`, return `PrepRes`.
 
 ## Exec
 
-- Pure computation. No `SharedStore` access.
-- Examples: LLM calls, shell commands, HTTP requests.
-- Supports retry. Must be idempotent if retries enabled.
-- Return `exec_res`, passed to `post()`.
+- Pure computation. No SharedStore access.
+- Receives `PrepRes`, returns `ExecRes`.
+- Examples: LLM API calls, shell commands, file I/O.
 
 ## Post
 
-- Write results to `SharedStore`.
+- Write results to `&mut SharedStore`.
+- Receives both `PrepRes` and `ExecRes`.
+
+## Implementations
+
+- `LLMCall` — streaming LLM request.
+- `BashExec` — shell command execution.
+- `ReadFile`, `WriteFile`, `EditFile` — file operations.

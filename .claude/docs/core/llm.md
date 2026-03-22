@@ -1,5 +1,5 @@
 ---
-description: LLM integration
+description: LLM integration (OpenAI-compatible streaming)
 ---
 
 # LLM
@@ -7,28 +7,27 @@ description: LLM integration
 Generic config, no per-provider backends:
 
 ```
-model: string
-base_url: string
-api_key: string
+model, base_url, api_key, context_window
 ```
 
-## Response Format
+## LLMCall (Node)
 
-Native function calling. No custom JSON.
+- `prep`: builds request from system_prompt + history + tool definitions.
+- `exec`: streams SSE response, aggregates content and tool_calls.
+- `post`: appends assistant message to history.
 
-- `content` — thought or final answer.
-- `tool_calls` — action (Bash or Skill).
+## Streaming
 
-### Flow
+Content chunks are sent to `channel.on_stream_chunk()` in real-time.
+Only non-empty content is streamed.
 
-- `tool_calls` present → action, `content` is thought.
-- `content` only, no `tool_calls` → final answer.
+## Response
 
-### Observation
+- `content` — LLM text output.
+- `tool_calls` — function calls (bash, read_file, write_file, edit_file).
+- `usage` — prompt_tokens, completion_tokens, total_tokens.
 
-`tool` role with `tool_call_id`, set by the environment.
+## Flow
 
-### Tools
-
-- `bash` — execute shell command.
-- `skill` — load and use a skill by name.
+- `tool_calls` present → agent dispatches tools, loops back.
+- No `tool_calls` → final answer, agent breaks.
