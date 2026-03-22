@@ -26,6 +26,9 @@ pub trait Channel: Send + Sync {
 
     /// Stream a chunk of LLM response to the user
     async fn on_stream_chunk(&self, chunk: &str);
+
+    /// Flush buffered stream content after LLM finishes responding
+    async fn flush(&self);
 }
 
 /// No-op channel for internal LLM calls (e.g. context compaction)
@@ -44,4 +47,6 @@ impl Channel for SilentChannel {
     }
 
     async fn on_stream_chunk(&self, _chunk: &str) {}
+
+    async fn flush(&self) {}
 }

@@ -73,12 +73,7 @@ impl Node for BashExec {
         _prep_res: String,
         exec_res: String,
     ) -> Result<()> {
-        store.context.history.push(Message {
-            role: Role::Tool,
-            content: Some(exec_res),
-            tool_calls: None,
-            tool_call_id: Some(self.call_id.clone()),
-        });
+        push_tool_result(store, &self.call_id, exec_res);
         Ok(())
     }
 }
@@ -116,12 +111,7 @@ impl Node for ReadFile {
         _prep_res: String,
         exec_res: String,
     ) -> Result<()> {
-        store.context.history.push(Message {
-            role: Role::Tool,
-            content: Some(exec_res),
-            tool_calls: None,
-            tool_call_id: Some(self.call_id.clone()),
-        });
+        push_tool_result(store, &self.call_id, exec_res);
         Ok(())
     }
 }
@@ -157,12 +147,7 @@ impl Node for WriteFile {
         _prep_res: (String, String),
         exec_res: String,
     ) -> Result<()> {
-        store.context.history.push(Message {
-            role: Role::Tool,
-            content: Some(exec_res),
-            tool_calls: None,
-            tool_call_id: Some(self.call_id.clone()),
-        });
+        push_tool_result(store, &self.call_id, exec_res);
         Ok(())
     }
 }
@@ -211,12 +196,7 @@ impl Node for EditFile {
         _prep_res: (String, String, String),
         exec_res: String,
     ) -> Result<()> {
-        store.context.history.push(Message {
-            role: Role::Tool,
-            content: Some(exec_res),
-            tool_calls: None,
-            tool_call_id: Some(self.call_id.clone()),
-        });
+        push_tool_result(store, &self.call_id, exec_res);
         Ok(())
     }
 }
@@ -415,6 +395,15 @@ pub async fn dispatch_tool(
 }
 
 // Helpers
+
+fn push_tool_result(store: &mut SharedStore, call_id: &str, content: String) {
+    store.context.history.push(Message {
+        role: Role::Tool,
+        content: Some(content),
+        tool_calls: None,
+        tool_call_id: Some(call_id.to_string()),
+    });
+}
 
 fn safe_path(raw: &str) -> Result<String> {
     let workdir = std::env::current_dir()?;

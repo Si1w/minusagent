@@ -97,21 +97,8 @@ impl Channel for DiscordReply {
     }
 
     async fn send(&self, text: &str) {
-        let mut buf = self.buffer.lock().await;
-        let full = if buf.is_empty() {
-            text.to_string()
-        } else {
-            let combined = std::mem::take(&mut *buf);
-            if text.is_empty() {
-                combined
-            } else {
-                format!("{combined}\n\n{text}")
-            }
-        };
-        drop(buf);
-
-        if !full.is_empty() {
-            if let Err(e) = self.send_message(&full).await {
+        if !text.is_empty() {
+            if let Err(e) = self.send_message(text).await {
                 log::error!("Discord: failed to send message: {e}");
             }
         }
@@ -136,6 +123,15 @@ impl Channel for DiscordReply {
 
     async fn on_stream_chunk(&self, chunk: &str) {
         self.buffer.lock().await.push_str(chunk);
+    }
+
+    async fn flush(&self) {
+        let buf = std::mem::take(&mut *self.buffer.lock().await);
+        if !buf.is_empty() {
+            if let Err(e) = self.send_message(&buf).await {
+                log::error!("Discord: failed to flush stream buffer: {e}");
+            }
+        }
     }
 }
 

@@ -29,9 +29,8 @@ pub trait Node {
     /// Run the full pipeline: prep → exec → post
     async fn run(&self, store: &mut SharedStore) -> Result<Self::ExecRes> {
         let prep_res = self.prep(store).await?;
-        let prep_res_clone = prep_res.clone();
-        let exec_res = self.exec(prep_res).await?;
-        self.post(store, prep_res_clone, exec_res.clone()).await?;
+        let exec_res = self.exec(prep_res.clone()).await?;
+        self.post(store, prep_res, exec_res.clone()).await?;
         Ok(exec_res)
     }
 }
