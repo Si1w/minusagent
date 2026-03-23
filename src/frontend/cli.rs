@@ -11,15 +11,8 @@ use tokio::time::Duration;
 
 use crate::frontend::{Channel, UserMessage};
 
-const BANNER: &str = "minusagent\n\n\
-  /new <label>    Start a new session\n\
-  /save           Save current session\n\
-  /load <id>      Load a session by ID or prefix\n\
-  /list           List all sessions\n\
-  /compact        Compact conversation history\n\
-  /discord        Start Discord gateway\n\
-  /gateway        Start WebSocket gateway\n\
-  /exit           Exit\n\n\n";
+const BANNER: &str = "\
+Welcome. Type a message to chat, or use / commands.\n\n";
 
 struct TuiState {
     output: String,
@@ -174,9 +167,34 @@ fn render(state: &mut TuiState, frame: &mut Frame) {
         .split(frame.area());
 
     // Output area
+    let title = Line::from(vec![
+        Span::raw(" minus"),
+        Span::styled("agent", Style::default().fg(Color::Cyan).bold()),
+        Span::raw(" "),
+    ]);
+    let hint = Line::from(vec![
+        Span::styled(
+            " /new /save /load /list /compact ",
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            "/remember ",
+            Style::default().fg(Color::Magenta),
+        ),
+        Span::styled(
+            "/<skill> ",
+            Style::default().fg(Color::Green),
+        ),
+        Span::styled(
+            "/help /discord /gateway /exit ",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" minusagent ");
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(title)
+        .title_bottom(hint);
     let inner_width = block.inner(chunks[0]).width;
     let inner_height = block.inner(chunks[0]).height;
 
@@ -246,6 +264,7 @@ impl Channel for Cli {
             text,
             sender_id: "cli-user".into(),
             channel: "cli".into(),
+            account_id: String::new(),
             guild_id: String::new(),
         })
     }

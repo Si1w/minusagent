@@ -11,6 +11,7 @@ use crate::core::llm::LLMCall;
 use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore};
 use crate::frontend::{Channel, SilentChannel};
+use crate::intelligence::memory::MemoryWrite;
 
 const SESSIONS_DIR: &str = "sessions";
 const COMPACT_THRESHOLD: f64 = 0.8;
@@ -35,8 +36,8 @@ struct SessionStore {
 }
 
 impl SessionStore {
-    fn new() -> Result<Self> {
-        let base_dir = Path::new(SESSIONS_DIR).to_path_buf();
+    fn new(base_dir: &Path) -> Result<Self> {
+        let base_dir = base_dir.to_path_buf();
         std::fs::create_dir_all(&base_dir)?;
         let index_path = base_dir.join("sessions.json");
 
@@ -186,7 +187,7 @@ pub struct Session {
 impl Session {
     /// Create a new session orchestrator
     pub fn new(store: SharedStore) -> Result<Self> {
-        let session_store = SessionStore::new()?;
+        let session_store = SessionStore::new(Path::new(SESSIONS_DIR))?;
         let agent = Agent;
         let http = reqwest::Client::new();
         Ok(Self { store, session_store, agent, http })
@@ -200,6 +201,17 @@ impl Session {
     ) -> Result<()> {
         if input.starts_with('/') {
             return self.handle_command(input, channel).await;
+        }
+
+        // Rebuild system prompt if intelligence is configured
+        if let Some(prompt) = self
+            .store
+            .state
+            .intelligence
+            .as_ref()
+            .map(|intel| intel.build_prompt())
+        {
+            self.store.context.system_prompt = prompt;
         }
 
         self.store.context.history.push(Message {
@@ -333,6 +345,28 @@ impl Session {
         let arg = parts.get(1).unwrap_or(&"").trim();
 
         match cmd {
+            "/help" => {
+                channel
+                    .send(
+                        "Sessions\n\
+                         \x20 /new <label>            New session\n\
+                         \x20 /save                   Save session\n\
+                         \x20 /load <id>              Load session\n\
+                         \x20 /list                   List sessions\n\
+                         \x20 /compact                Compact history\n\
+                         \n\
+                         Intelligence\n\
+                         \x20 /remember <name> <txt>  Save memory\n\
+                         \x20 /<skill> [args]         Invoke skill\n\
+                         \n\
+                         Gateways\n\
+                         \x20 /discord                Discord bot\n\
+                         \x20 /gateway                WebSocket API\n\
+                         \n\
+                         /help  /exit",
+                    )
+                    .await;
+            }
             "/new" => {
                 let id = self.session_store.create(arg)?;
                 self.store.context.history.clear();
@@ -405,7 +439,78 @@ impl Session {
                         .await;
                 }
             }
+            "/remember" => {
+                let rem_parts: Vec<&str> =
+                    arg.splitn(2, ' ').collect();
+                if rem_parts.len() < 2 || rem_parts[0].is_empty() {
+                    channel
+                        .send("Usage: /remember <name> <content>")
+                        .await;
+                    return Ok(());
+                }
+                let name = rem_parts[0];
+                let content = rem_parts[1];
+
+                let memory_dir = self
+                    .store
+                    .state
+                    .intelligence
+                    .as_ref()
+                    .map(|i| i.memory.dir().to_path_buf());
+
+                match memory_dir {
+                    Some(dir) => {
+                        let node = MemoryWrite {
+                            content: content.to_string(),
+                            name: name.to_string(),
+                            memory_dir: dir,
+                            http: self.http.clone(),
+                        };
+                        node.run(&mut self.store).await?;
+                        channel
+                            .send(&format!("Memory saved: {name}"))
+                            .await;
+                    }
+                    None => {
+                        channel
+                            .send(
+                                "Intelligence not configured \
+                                 (set WORKSPACE_DIR)",
+                            )
+                            .await;
+                    }
+                }
+            }
             _ => {
+                // Check if cmd matches a skill invocation
+                let skill_body = self
+                    .store
+                    .state
+                    .intelligence
+                    .as_ref()
+                    .and_then(|i| i.find_skill(cmd))
+                    .map(|s| s.body.clone());
+
+                if let Some(body) = skill_body {
+                    let skill_input = if arg.is_empty() {
+                        format!("[Skill: {cmd}]\n\n{body}")
+                    } else {
+                        format!(
+                            "[Skill: {cmd}]\n\n{body}\n\nUser input: {arg}"
+                        )
+                    };
+                    self.store.context.history.push(Message {
+                        role: Role::User,
+                        content: Some(skill_input),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    });
+                    self.agent
+                        .run(&mut self.store, channel, &self.http)
+                        .await?;
+                    return Ok(());
+                }
+
                 channel
                     .send(&format!("Unknown command: {cmd}"))
                     .await;
@@ -431,7 +536,8 @@ mod tests {
 
     #[test]
     fn test_session_store_create_and_list() {
-        let mut store = SessionStore::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SessionStore::new(dir.path()).unwrap();
         let id = store.create("test-label").unwrap();
 
         assert_eq!(store.current_id.as_deref(), Some(id.as_str()));
@@ -440,17 +546,12 @@ mod tests {
         assert!(sessions.iter().any(|(sid, meta)| {
             sid == &id && meta.label == "test-label"
         }));
-
-        std::fs::remove_file(
-            Path::new(SESSIONS_DIR).join(format!("{id}.jsonl")),
-        ).ok();
-        store.index.remove(&id);
-        store.save_index().ok();
     }
 
     #[test]
     fn test_session_store_save_and_load() {
-        let mut store = SessionStore::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SessionStore::new(dir.path()).unwrap();
         let id = store.create("save-load-test").unwrap();
 
         let history = vec![
@@ -464,17 +565,12 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].content.as_deref(), Some("hello"));
         assert_eq!(loaded[1].content.as_deref(), Some("hi there"));
-
-        std::fs::remove_file(
-            Path::new(SESSIONS_DIR).join(format!("{id}.jsonl")),
-        ).ok();
-        store.index.remove(&id);
-        store.save_index().ok();
     }
 
     #[test]
     fn test_session_store_save_no_active_session() {
-        let mut store = SessionStore::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SessionStore::new(dir.path()).unwrap();
         let result = store.save(&[]);
         assert!(result.is_err());
         assert!(
@@ -484,24 +580,20 @@ mod tests {
 
     #[test]
     fn test_session_store_load_not_found() {
-        let mut store = SessionStore::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SessionStore::new(dir.path()).unwrap();
         let result = store.load("nonexistent_id_12345");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_session_store_prefix_match() {
-        let mut store = SessionStore::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SessionStore::new(dir.path()).unwrap();
         let id = store.create("prefix-test").unwrap();
 
         let prefix = &id[..4];
         let loaded = store.load(prefix).unwrap();
         assert!(loaded.is_empty());
-
-        std::fs::remove_file(
-            Path::new(SESSIONS_DIR).join(format!("{id}.jsonl")),
-        ).ok();
-        store.index.remove(&id);
-        store.save_index().ok();
     }
 }

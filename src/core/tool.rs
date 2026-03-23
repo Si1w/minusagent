@@ -452,6 +452,7 @@ mod tests {
                         context_window: 256_000,
                     },
                 },
+                intelligence: None,
             },
         }
     }

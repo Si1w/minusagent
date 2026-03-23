@@ -302,6 +302,7 @@ mod tests {
             text: String::new(),
             sender_id: sender_id.into(),
             channel: channel.into(),
+            account_id: String::new(),
             guild_id: String::new(),
         }
     }
