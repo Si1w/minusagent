@@ -18,7 +18,8 @@ const BANNER: &str = "minusagent\n\n\
   /list           List all sessions\n\
   /compact        Compact conversation history\n\
   /discord        Start Discord gateway\n\
-  /exit           Exit\n";
+  /gateway        Start WebSocket gateway\n\
+  /exit           Exit\n\n\n";
 
 struct TuiState {
     output: String,
@@ -245,6 +246,7 @@ impl Channel for Cli {
             text,
             sender_id: "cli-user".into(),
             channel: "cli".into(),
+            guild_id: String::new(),
         })
     }
 

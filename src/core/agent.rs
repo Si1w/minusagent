@@ -15,10 +15,6 @@ use crate::frontend::Channel;
 pub struct Agent;
 
 impl Agent {
-    pub fn new() -> Self {
-        Self
-    }
-
     /// Run the CoT loop against the given store
     ///
     /// # Arguments

@@ -5,13 +5,15 @@ Rust agent framework. Everything is a Node (`prep → exec → post`).
 ## Architecture
 
 ```
-Frontend (CLI TUI / Discord)
+Frontend (CLI TUI / Discord / WebSocket Gateway)
        ↓
-main.rs: routing layer (mpsc channel, per-session tasks)
+    UserMessage
        ↓
-Session (per user/channel)
+main.rs: routing layer (AppState + BindingTable → agent_id + session_key)
+       ↓
+Session (per session_key, built from AgentConfig)
 ├── Persistence: JSONL + index
-├── Commands: /new, /save, /load, /list, /compact, /discord, /exit
+├── Commands: /new, /save, /load, /list, /compact, /discord, /gateway, /exit
 └── Agent CoT loop
        ↓
   Agent.run()
@@ -23,18 +25,24 @@ Session (per user/channel)
               └── EditFile (Node)
 ```
 
-- **Frontend**: CLI (ratatui TUI) + Discord (gateway WebSocket). Swappable via `Channel` trait.
+- **Frontend**: CLI (ratatui TUI) + Discord + WebSocket Gateway. Swappable via `Channel` trait.
+- **Router**: BindingTable (5-tier: peer > guild > account > channel > default) resolves agent_id + session_key.
+- **AgentManager**: Registry of AgentConfig (personality, model override, dm_scope).
 - **Session**: Orchestrator. Owns SharedStore. `turn(input)` routes commands or runs Agent.
-- **Agent**: Stateless CoT loop. `run(store, channel)` calls LLM → dispatch tools → repeat.
+- **Agent**: Stateless CoT loop. `run(store, channel, http)` calls LLM → dispatch tools → repeat.
 - **Node**: Universal building block. `prep(store) → exec() → post(store)`.
 - **SharedStore**: Context (LLM-visible) + SystemState (LLM-invisible).
 
 ## LLM
 
-Generic config: `model`, `base_url`, `api_key`, `context_window`. No per-provider backends.
+Global provider config: `base_url`, `api_key`, `context_window`. Per-agent override: `model`. No per-provider backends.
 
 ## Concurrency
 
 Each session key gets a dedicated tokio task with its own mpsc channel.
 Same session: serial. Different sessions: concurrent.
 CLI waits for session completion via oneshot before showing next prompt.
+
+## Shared State
+
+`AppState` (AgentManager + BindingTable + session set) wrapped in `Arc<RwLock>`. Shared between main loop and Gateway. Gateway can register agents and modify bindings at runtime via JSON-RPC.

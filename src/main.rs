@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -7,44 +8,67 @@ mod core;
 mod frontend;
 mod logger;
 
+use crate::core::manager::{AgentConfig, AgentManager};
+use crate::core::router::BindingTable;
 use crate::core::session::Session;
 use crate::core::store::{Config, Context, LLMConfig, SharedStore, SystemState};
 use crate::frontend::Channel;
+use crate::frontend::UserMessage;
 use crate::frontend::cli::Cli;
+use crate::frontend::gateway::{AppState, SharedState};
 
-/// A message routed from a channel to the main loop
+/// A message routed from a frontend to the main loop
 pub struct RoutedMessage {
-    text: String,
-    session_key: String,
-    channel: Arc<dyn Channel>,
-    done: Option<oneshot::Sender<()>>,
+    pub msg: UserMessage,
+    pub frontend: Arc<dyn Channel>,
+    pub done: Option<oneshot::Sender<()>>,
 }
 
-fn build_store() -> SharedStore {
-    let system_prompt = std::fs::read_to_string("prompts/system.md")
-        .expect("Failed to read prompts/system.md");
+/// Global LLM provider config (shared across all agents)
+struct ProviderConfig {
+    base_url: String,
+    api_key: String,
+    context_window: usize,
+    default_model: String,
+}
 
-    SharedStore {
-        context: Context {
-            system_prompt,
-            history: Vec::new(),
-        },
-        state: SystemState {
-            config: Config {
-                llm: LLMConfig {
-                    model: std::env::var("LLM_MODEL")
-                        .expect("LLM_MODEL not set"),
-                    base_url: std::env::var("LLM_BASE_URL")
-                        .expect("LLM_BASE_URL not set"),
-                    api_key: std::env::var("LLM_API_KEY")
-                        .expect("LLM_API_KEY not set"),
-                    context_window: std::env::var("LLM_CONTEXT_WINDOW")
-                        .expect("LLM_CONTEXT_WINDOW not set")
-                        .parse()
-                        .expect("LLM_CONTEXT_WINDOW must be a number"),
+impl ProviderConfig {
+    fn from_env() -> Self {
+        Self {
+            default_model: std::env::var("LLM_MODEL")
+                .expect("LLM_MODEL not set"),
+            base_url: std::env::var("LLM_BASE_URL")
+                .expect("LLM_BASE_URL not set"),
+            api_key: std::env::var("LLM_API_KEY")
+                .expect("LLM_API_KEY not set"),
+            context_window: std::env::var("LLM_CONTEXT_WINDOW")
+                .expect("LLM_CONTEXT_WINDOW not set")
+                .parse()
+                .expect("LLM_CONTEXT_WINDOW must be a number"),
+        }
+    }
+
+    fn build_store(
+        &self,
+        system_prompt: String,
+        model: String,
+    ) -> SharedStore {
+        SharedStore {
+            context: Context {
+                system_prompt,
+                history: Vec::new(),
+            },
+            state: SystemState {
+                config: Config {
+                    llm: LLMConfig {
+                        model,
+                        base_url: self.base_url.clone(),
+                        api_key: self.api_key.clone(),
+                        context_window: self.context_window,
+                    },
                 },
             },
-        },
+        }
     }
 }
 
@@ -55,15 +79,42 @@ async fn main() {
 
     let (tx, mut rx) = mpsc::channel::<RoutedMessage>(32);
 
-    // CLI always starts; /discord spawns the gateway at runtime
+    // Provider config
+    let provider = ProviderConfig::from_env();
+
+    let default_prompt = std::fs::read_to_string("prompts/system.md")
+        .expect("Failed to read prompts/system.md");
+
+    // Shared state: agent manager + binding table
+    let mut mgr = AgentManager::new(provider.default_model.clone());
+    mgr.register(AgentConfig {
+        id: "main".into(),
+        name: "main".into(),
+        personality: String::new(),
+        system_prompt: default_prompt,
+        model: String::new(),
+        dm_scope: "per-peer".into(),
+    });
+
+    let state: SharedState = Arc::new(RwLock::new(AppState {
+        mgr,
+        table: BindingTable::new(),
+        sessions: Default::default(),
+        start_time: Instant::now(),
+    }));
+
+    // CLI always starts; /discord and /gateway spawn at runtime
     let cli: Arc<dyn Channel> = Arc::new(Cli::new());
     let cli_clone = cli.clone();
     let cli_tx = tx.clone();
     let dc_tx = tx.clone();
+    let gw_tx = tx.clone();
+    let gw_state = state.clone();
     drop(tx);
 
     tokio::spawn(async move {
         let mut discord_started = false;
+        let mut gateway_started = false;
         loop {
             let msg = match cli_clone.receive().await {
                 Some(msg) => msg,
@@ -77,7 +128,9 @@ async fn main() {
 
             if msg.text == "/discord" {
                 if discord_started {
-                    cli_clone.send("Discord gateway already running").await;
+                    cli_clone
+                        .send("Discord gateway already running")
+                        .await;
                     continue;
                 }
                 match std::env::var("DISCORD_BOT_TOKEN") {
@@ -90,28 +143,59 @@ async fn main() {
                                 )
                                 .await
                             {
-                                log::error!("Discord gateway error: {e}");
+                                log::error!(
+                                    "Discord gateway error: {e}"
+                                );
                             }
                         });
                         discord_started = true;
-                        cli_clone.send("Discord gateway started").await;
+                        cli_clone
+                            .send("Discord gateway started")
+                            .await;
                     }
                     _ => {
-                        cli_clone.send("DISCORD_BOT_TOKEN not set").await;
+                        cli_clone
+                            .send("DISCORD_BOT_TOKEN not set")
+                            .await;
                     }
                 }
+                continue;
+            }
+
+            if msg.text == "/gateway" {
+                if gateway_started {
+                    cli_clone
+                        .send("WebSocket gateway already running")
+                        .await;
+                    continue;
+                }
+                let gs = gw_state.clone();
+                let gt = gw_tx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        frontend::gateway::start_gateway(
+                            gs,
+                            gt,
+                            "localhost",
+                            8765,
+                        )
+                        .await
+                    {
+                        log::error!("WebSocket gateway error: {e}");
+                    }
+                });
+                gateway_started = true;
+                cli_clone
+                    .send("WebSocket gateway started on ws://localhost:8765")
+                    .await;
                 continue;
             }
 
             let (done_tx, done_rx) = oneshot::channel();
             let _ = cli_tx
                 .send(RoutedMessage {
-                    text: msg.text,
-                    session_key: format!(
-                        "{}:{}",
-                        msg.channel, msg.sender_id
-                    ),
-                    channel: cli_clone.clone(),
+                    msg,
+                    frontend: cli_clone.clone(),
                     done: Some(done_tx),
                 })
                 .await;
@@ -124,18 +208,37 @@ async fn main() {
         HashMap::<String, mpsc::Sender<RoutedMessage>>::new();
 
     while let Some(routed) = rx.recv().await {
+        let (session_key, system_prompt, model) = {
+            let s = state.read().expect("State lock poisoned");
+            let (agent_id, sk) = s.resolve_route(&routed.msg);
+            let prompt = s
+                .mgr
+                .get(&agent_id)
+                .map(|a| a.effective_system_prompt())
+                .unwrap_or_default();
+            let model = s.mgr.effective_model(&agent_id);
+            (sk, prompt, model)
+        };
+        {
+            let mut s = state.write().expect("State lock poisoned");
+            s.sessions.insert(session_key.clone());
+        }
+
         let session_tx = session_txs
-            .entry(routed.session_key.clone())
+            .entry(session_key)
             .or_insert_with(|| {
+                let store =
+                    provider.build_store(system_prompt, model);
                 let (stx, mut srx) = mpsc::channel::<RoutedMessage>(8);
                 tokio::spawn(async move {
-                    let mut session = Session::new(build_store())
+                    let mut session = Session::new(store)
                         .expect("Failed to create session");
                     while let Some(msg) = srx.recv().await {
-                        if let Err(e) =
-                            session.turn(&msg.text, &msg.channel).await
+                        if let Err(e) = session
+                            .turn(&msg.msg.text, &msg.frontend)
+                            .await
                         {
-                            msg.channel
+                            msg.frontend
                                 .send(&format!("Error: {e}"))
                                 .await;
                         }
