@@ -8,7 +8,7 @@ Stateless chain-of-thought loop. Does not own SharedStore or Channel — receive
 
 `Agent::run(store, channel, http)`:
 
-1. Call LLMCall (Node) → get streaming response.
+1. Call LLMCall (Node) → get streaming response with `content` and/or `tool_calls`.
 2. If `tool_calls` present → dispatch each tool via `dispatch_tool()` → loop to 1.
 3. If no `tool_calls` → `channel.flush()` to finalize stream → break.
 

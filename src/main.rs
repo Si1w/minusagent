@@ -6,6 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 
 mod core;
 mod frontend;
+mod intelligence;
 mod logger;
 
 use crate::core::manager::{AgentConfig, AgentManager};
@@ -16,6 +17,7 @@ use crate::frontend::Channel;
 use crate::frontend::UserMessage;
 use crate::frontend::cli::Cli;
 use crate::frontend::gateway::{AppState, SharedState};
+use crate::intelligence::Intelligence;
 
 /// A message routed from a frontend to the main loop
 pub struct RoutedMessage {
@@ -30,6 +32,7 @@ struct ProviderConfig {
     api_key: String,
     context_window: usize,
     default_model: String,
+    workspace_dir: Option<std::path::PathBuf>,
 }
 
 impl ProviderConfig {
@@ -45,6 +48,10 @@ impl ProviderConfig {
                 .expect("LLM_CONTEXT_WINDOW not set")
                 .parse()
                 .expect("LLM_CONTEXT_WINDOW must be a number"),
+            workspace_dir: std::env::var("WORKSPACE_DIR")
+                .ok()
+                .map(std::path::PathBuf::from)
+                .filter(|p| p.is_dir()),
         }
     }
 
@@ -52,6 +59,7 @@ impl ProviderConfig {
         &self,
         system_prompt: String,
         model: String,
+        intelligence: Option<Intelligence>,
     ) -> SharedStore {
         SharedStore {
             context: Context {
@@ -67,6 +75,7 @@ impl ProviderConfig {
                         context_window: self.context_window,
                     },
                 },
+                intelligence,
             },
         }
     }
@@ -82,8 +91,8 @@ async fn main() {
     // Provider config
     let provider = ProviderConfig::from_env();
 
-    let default_prompt = std::fs::read_to_string("prompts/system.md")
-        .expect("Failed to read prompts/system.md");
+    let default_prompt = std::fs::read_to_string("prompts/identity.md")
+        .expect("Failed to read prompts/identity.md");
 
     // Shared state: agent manager + binding table
     let mut mgr = AgentManager::new(provider.default_model.clone());
@@ -207,8 +216,10 @@ async fn main() {
     let mut session_txs =
         HashMap::<String, mpsc::Sender<RoutedMessage>>::new();
 
+    let prompts_dir = std::path::Path::new("prompts");
+
     while let Some(routed) = rx.recv().await {
-        let (session_key, system_prompt, model) = {
+        let (session_key, system_prompt, model, agent_id, channel_name) = {
             let s = state.read().expect("State lock poisoned");
             let (agent_id, sk) = s.resolve_route(&routed.msg);
             let prompt = s
@@ -217,7 +228,8 @@ async fn main() {
                 .map(|a| a.effective_system_prompt())
                 .unwrap_or_default();
             let model = s.mgr.effective_model(&agent_id);
-            (sk, prompt, model)
+            let ch = routed.msg.channel.clone();
+            (sk, prompt, model, agent_id, ch)
         };
         {
             let mut s = state.write().expect("State lock poisoned");
@@ -227,8 +239,26 @@ async fn main() {
         let session_tx = session_txs
             .entry(session_key)
             .or_insert_with(|| {
-                let store =
-                    provider.build_store(system_prompt, model);
+                let intelligence =
+                    provider.workspace_dir.as_ref().map(|ws| {
+                        Intelligence::new(
+                            ws,
+                            prompts_dir,
+                            agent_id,
+                            channel_name,
+                            model.clone(),
+                        )
+                    });
+                // If intelligence is configured, use its initial prompt
+                let initial_prompt = intelligence
+                    .as_ref()
+                    .map(|i| i.build_prompt())
+                    .unwrap_or(system_prompt);
+                let store = provider.build_store(
+                    initial_prompt,
+                    model,
+                    intelligence,
+                );
                 let (stx, mut srx) = mpsc::channel::<RoutedMessage>(8);
                 tokio::spawn(async move {
                     let mut session = Session::new(store)

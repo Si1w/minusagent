@@ -9,7 +9,8 @@ Orchestrator between Frontend and Agent. Owns SharedStore and Agent.
 ## turn(input, channel)
 
 - Routes `/commands` to `handle_command()`.
-- Otherwise appends user message to history, runs `Agent::run()`.
+- If Intelligence is configured, rebuilds `system_prompt` via `Intelligence::build_prompt()` before each turn.
+- Appends user message to history, runs `Agent::run()`.
 - After agent completes, checks if `total_tokens > 80% context_window` → auto-compact.
 
 ## Commands

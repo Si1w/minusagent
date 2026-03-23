@@ -32,10 +32,13 @@ struct GatewayPayload {
 
 // Discord message event
 
+// Discord MESSAGE_CREATE event
+// `guild_id` is absent in DM messages, present in server channels.
 #[derive(Debug, Deserialize)]
 struct MessageCreate {
     content: String,
     channel_id: String,
+    guild_id: Option<String>,
     author: Author,
 }
 
@@ -186,15 +189,22 @@ pub async fn start_gateway(
         .send(WsMessage::Text(identify.to_string().into()))
         .await?;
 
-    // Wait for READY event
+    // Wait for READY event and extract bot user ID
     log::info!("Discord: connecting...");
+    let mut bot_user_id = String::new();
     while let Some(Ok(WsMessage::Text(text))) = read.next().await {
         if let Ok(payload) = serde_json::from_str::<GatewayPayload>(&text) {
             if let Some(s) = payload.s {
                 seq = Some(s);
             }
             if payload.op == 0 && payload.t.as_deref() == Some("READY") {
-                log::info!("Discord: connected and ready");
+                if let Some(d) = &payload.d {
+                    bot_user_id = d["user"]["id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                }
+                log::info!("Discord: connected and ready (bot_id={bot_user_id})");
                 break;
             }
         }
@@ -289,7 +299,10 @@ pub async fn start_gateway(
                     text: msg.content,
                     sender_id: msg.author.id,
                     channel: "discord".into(),
-                    guild_id: String::new(),
+                    account_id: bot_user_id.clone(),
+                    guild_id: msg
+                        .guild_id
+                        .unwrap_or_default(),
                 },
                 frontend: reply,
                 done: None,

@@ -8,6 +8,7 @@ pub struct UserMessage {
     pub text: String,
     pub sender_id: String,
     pub channel: String,
+    pub account_id: String,
     pub guild_id: String,
 }
 

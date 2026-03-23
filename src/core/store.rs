@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::intelligence::Intelligence;
+
 /// LLM-visible conversation state
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Context {
@@ -48,6 +50,7 @@ pub struct Config {
 /// LLM-invisible system state
 pub struct SystemState {
     pub config: Config,
+    pub intelligence: Option<Intelligence>,
 }
 
 /// Two-layer state container shared across all nodes

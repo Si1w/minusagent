@@ -35,7 +35,12 @@ impl AppState {
     pub fn resolve_route(&self, msg: &UserMessage) -> (String, String) {
         let agent_id = self
             .table
-            .resolve_msg(&msg.channel, "", &msg.guild_id, &msg.sender_id)
+            .resolve_msg(
+                &msg.channel,
+                &msg.account_id,
+                &msg.guild_id,
+                &msg.sender_id,
+            )
             .map(|b| b.agent_id.clone())
             .unwrap_or_else(|| "main".into());
 
@@ -48,7 +53,7 @@ impl AppState {
         let session_key = build_session_key(
             &agent_id,
             &msg.channel,
-            "",
+            &msg.account_id,
             &msg.sender_id,
             dm_scope,
         );
@@ -226,11 +231,21 @@ async fn m_send(
         .unwrap_or("ws-client")
         .to_string();
 
+    let account_id = params["account_id"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let guild_id = params["guild_id"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
     let msg = UserMessage {
         text,
         sender_id: peer_id,
         channel,
-        guild_id: String::new(),
+        account_id,
+        guild_id,
     };
 
     let (agent_id, session_key) = {
@@ -245,7 +260,7 @@ async fn m_send(
             let sk = build_session_key(
                 &aid,
                 &msg.channel,
-                "",
+                &msg.account_id,
                 &msg.sender_id,
                 dm_scope,
             );
