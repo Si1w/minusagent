@@ -398,6 +398,10 @@ fn m_agents_register(
             .as_str()
             .unwrap_or("per-peer")
             .to_string(),
+        workspace_dir: params["workspace_dir"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
     };
     let id = normalize_agent_id(&config.id);
     s.mgr.register(config);

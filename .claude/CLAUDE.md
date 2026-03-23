@@ -41,7 +41,7 @@ Session (per session_key, built from AgentConfig)
 
 When `WORKSPACE_DIR` is set, system prompt is rebuilt each turn from 8 layers:
 
-1. Identity (`prompts/identity.md` fallback, or workspace `IDENTITY.md`)
+1. Identity (`prompts/system.md` fallback, or workspace `IDENTITY.md`)
 2. Personality (workspace `SOUL.md`)
 3. Tool guidelines (workspace `TOOLS.md`)
 4. Skills (`prompts/skills.md` template + discovered `SKILL.md` files)

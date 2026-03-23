@@ -461,6 +461,7 @@ mod tests {
             system_prompt: String::new(),
             model: String::new(),
             dm_scope: "per-peer".into(),
+            workspace_dir: String::new(),
         });
         mgr.register(AgentConfig {
             id: "sage".into(),
@@ -469,6 +470,7 @@ mod tests {
             system_prompt: String::new(),
             model: String::new(),
             dm_scope: "per-channel-peer".into(),
+            workspace_dir: String::new(),
         });
 
         let mut bt = BindingTable::new();

@@ -52,6 +52,8 @@ pub struct AgentConfig {
     /// Session isolation scope: "main", "per-peer", "per-channel-peer",
     /// "per-account-channel-peer"
     pub dm_scope: String,
+    /// Per-agent workspace directory; overrides global `WORKSPACE_DIR`
+    pub workspace_dir: String,
 }
 
 impl AgentConfig {
@@ -175,6 +177,7 @@ mod tests {
             system_prompt: String::new(),
             model: String::new(),
             dm_scope: "per-peer".into(),
+            workspace_dir: String::new(),
         };
         let prompt = config.effective_system_prompt();
         assert!(prompt.contains("You are Luna."));
@@ -190,6 +193,7 @@ mod tests {
             system_prompt: String::new(),
             model: String::new(),
             dm_scope: "per-peer".into(),
+            workspace_dir: String::new(),
         };
         let prompt = config.effective_system_prompt();
         assert!(prompt.contains("You are Bot."));
@@ -206,6 +210,7 @@ mod tests {
             system_prompt: String::new(),
             model: String::new(),
             dm_scope: "per-peer".into(),
+            workspace_dir: String::new(),
         });
         assert!(mgr.get("luna").is_some());
         assert!(mgr.get("LUNA").is_some());
@@ -222,6 +227,7 @@ mod tests {
             system_prompt: String::new(),
             model: "custom-model".into(),
             dm_scope: "per-peer".into(),
+            workspace_dir: String::new(),
         });
         mgr.register(AgentConfig {
             id: "b".into(),
@@ -230,6 +236,7 @@ mod tests {
             system_prompt: String::new(),
             model: String::new(),
             dm_scope: "per-peer".into(),
+            workspace_dir: String::new(),
         });
         assert_eq!(mgr.effective_model("a"), "custom-model");
         assert_eq!(mgr.effective_model("b"), "global-model");

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -91,8 +92,8 @@ async fn main() {
     // Provider config
     let provider = ProviderConfig::from_env();
 
-    let default_prompt = std::fs::read_to_string("prompts/identity.md")
-        .expect("Failed to read prompts/identity.md");
+    let default_prompt = std::fs::read_to_string("prompts/system.md")
+        .expect("Failed to read prompts/system.md");
 
     // Shared state: agent manager + binding table
     let mut mgr = AgentManager::new(provider.default_model.clone());
@@ -103,6 +104,7 @@ async fn main() {
         system_prompt: default_prompt,
         model: String::new(),
         dm_scope: "per-peer".into(),
+        workspace_dir: String::new(),
     });
 
     let state: SharedState = Arc::new(RwLock::new(AppState {
@@ -219,17 +221,23 @@ async fn main() {
     let prompts_dir = std::path::Path::new("prompts");
 
     while let Some(routed) = rx.recv().await {
-        let (session_key, system_prompt, model, agent_id, channel_name) = {
+        let (session_key, system_prompt, model, agent_id, channel_name, ws_dir) =
+        {
             let s = state.read().expect("State lock poisoned");
             let (agent_id, sk) = s.resolve_route(&routed.msg);
-            let prompt = s
-                .mgr
-                .get(&agent_id)
+            let agent = s.mgr.get(&agent_id);
+            let prompt = agent
                 .map(|a| a.effective_system_prompt())
                 .unwrap_or_default();
             let model = s.mgr.effective_model(&agent_id);
             let ch = routed.msg.channel.clone();
-            (sk, prompt, model, agent_id, ch)
+            // Per-agent workspace_dir > global WORKSPACE_DIR
+            let ws: Option<PathBuf> = agent
+                .map(|a| a.workspace_dir.clone())
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .or(provider.workspace_dir.clone());
+            (sk, prompt, model, agent_id, ch, ws)
         };
         {
             let mut s = state.write().expect("State lock poisoned");
@@ -240,7 +248,7 @@ async fn main() {
             .entry(session_key)
             .or_insert_with(|| {
                 let intelligence =
-                    provider.workspace_dir.as_ref().map(|ws| {
+                    ws_dir.as_ref().map(|ws| {
                         Intelligence::new(
                             ws,
                             prompts_dir,

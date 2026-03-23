@@ -10,8 +10,8 @@ const MAX_SKILLS_PROMPT: usize = 30_000;
 
 /// Loaded prompt fragments from `prompts/` directory
 pub struct PromptFragments {
-    /// Default identity text (fallback when workspace has no IDENTITY.md)
-    pub identity: String,
+    /// Default system prompt (fallback when workspace has no IDENTITY.md)
+    pub system: String,
     /// Skills section template (# Available Skills heading + ## Instructions)
     pub skills: String,
     /// Memory section template (# Memory heading + ## Instructions)
@@ -24,7 +24,7 @@ impl PromptFragments {
     /// Falls back to empty strings for missing files.
     pub fn load(prompts_dir: &Path) -> Self {
         Self {
-            identity: load_trimmed(&prompts_dir.join("identity.md")),
+            system: load_trimmed(&prompts_dir.join("system.md")),
             skills: load_trimmed(&prompts_dir.join("skills.md")),
             memory: load_trimmed(&prompts_dir.join("memory.md")),
         }
@@ -96,7 +96,7 @@ pub fn format_skills_content(skills: &[Skill]) -> String {
 ///
 /// # Layers
 ///
-/// 1. Identity (IDENTITY.md or prompts/identity.md fallback)
+/// 1. Identity (IDENTITY.md or prompts/system.md fallback)
 /// 2. Soul (SOUL.md personality — placed early for stronger influence)
 /// 3. Tool usage guidelines (TOOLS.md)
 /// 4. Skills
@@ -122,7 +122,7 @@ pub fn build_system_prompt(
         .get("IDENTITY.md")
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-        .unwrap_or(fragments.identity.as_str());
+        .unwrap_or(fragments.system.as_str());
     sections.push(identity.to_string());
 
     // Layer 2: Soul
@@ -222,7 +222,7 @@ mod tests {
 
     fn test_fragments() -> PromptFragments {
         PromptFragments {
-            identity: "You are a helpful assistant.".into(),
+            system: "You are a helpful assistant.".into(),
             skills: "# Available Skills\n\n## Instructions\n\nUse skills.".into(),
             memory: "# Memory\n\n## Instructions\n\nUse memory tools.".into(),
         }
