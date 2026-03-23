@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod discord;
+pub mod gateway;
 pub mod utils;
 
 /// A message received from the user
@@ -7,6 +8,7 @@ pub struct UserMessage {
     pub text: String,
     pub sender_id: String,
     pub channel: String,
+    pub guild_id: String,
 }
 
 /// Frontend communication interface

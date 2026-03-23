@@ -285,9 +285,13 @@ pub async fn start_gateway(
 
         let _ = tx
             .send(crate::RoutedMessage {
-                text: msg.content,
-                session_key: format!("discord:{}", msg.author.id),
-                channel: reply,
+                msg: UserMessage {
+                    text: msg.content,
+                    sender_id: msg.author.id,
+                    channel: "discord".into(),
+                    guild_id: String::new(),
+                },
+                frontend: reply,
                 done: None,
             })
             .await;

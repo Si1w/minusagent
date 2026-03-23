@@ -1,12 +1,11 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::fs;
 use tokio::process::Command;
-
-use std::sync::Arc;
 
 use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore};

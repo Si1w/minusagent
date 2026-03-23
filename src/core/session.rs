@@ -187,7 +187,7 @@ impl Session {
     /// Create a new session orchestrator
     pub fn new(store: SharedStore) -> Result<Self> {
         let session_store = SessionStore::new()?;
-        let agent = Agent::new();
+        let agent = Agent;
         let http = reqwest::Client::new();
         Ok(Self { store, session_store, agent, http })
     }
