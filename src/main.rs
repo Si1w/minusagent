@@ -25,6 +25,8 @@ pub struct RoutedMessage {
     pub msg: UserMessage,
     pub frontend: Arc<dyn Channel>,
     pub done: Option<oneshot::Sender<()>>,
+    /// Force routing to a specific agent (set by CLI /switch)
+    pub agent_override: Option<String>,
 }
 
 /// Global LLM provider config (shared across all agents)
@@ -121,11 +123,13 @@ async fn main() {
     let dc_tx = tx.clone();
     let gw_tx = tx.clone();
     let gw_state = state.clone();
+    let cli_state = state.clone();
     drop(tx);
 
     tokio::spawn(async move {
         let mut discord_started = false;
         let mut gateway_started = false;
+        let mut agent_override: Option<String> = None;
         loop {
             let msg = match cli_clone.receive().await {
                 Some(msg) => msg,
@@ -135,6 +139,84 @@ async fn main() {
             if msg.text == "/exit" {
                 frontend::cli::cleanup_terminal();
                 std::process::exit(0);
+            }
+
+            // /agents — list all registered agents
+            if msg.text == "/agents" {
+                let text = {
+                    let s = cli_state.read()
+                        .expect("State lock poisoned");
+                    let agents = s.mgr.list();
+                    if agents.is_empty() {
+                        "No agents registered.".to_string()
+                    } else {
+                        let mut lines =
+                            vec!["Registered agents:".to_string()];
+                        for a in &agents {
+                            let ws = if a.workspace_dir.is_empty() {
+                                "(default)"
+                            } else {
+                                &a.workspace_dir
+                            };
+                            let active =
+                                if agent_override.as_deref()
+                                    == Some(&*a.id)
+                                {
+                                    " ← active"
+                                } else {
+                                    ""
+                                };
+                            lines.push(format!(
+                                "  {} — workspace: {ws}{active}",
+                                a.id,
+                            ));
+                        }
+                        lines.join("\n")
+                    }
+                };
+                cli_clone.send(&text).await;
+                continue;
+            }
+
+            // /switch <agent> | /switch off
+            if msg.text.starts_with("/switch") {
+                let arg = msg.text.strip_prefix("/switch")
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if arg.is_empty() {
+                    let current = agent_override
+                        .as_deref()
+                        .unwrap_or("(default routing)");
+                    cli_clone
+                        .send(&format!("Current agent: {current}"))
+                        .await;
+                } else if arg == "off" {
+                    agent_override = None;
+                    cli_clone
+                        .send("Switched to default routing.")
+                        .await;
+                } else {
+                    let found = cli_state
+                        .read()
+                        .expect("State lock poisoned")
+                        .mgr
+                        .get(&arg)
+                        .is_some();
+                    if found {
+                        cli_clone
+                            .send(&format!("Switched to agent: {arg}"))
+                            .await;
+                        agent_override = Some(arg);
+                    } else {
+                        cli_clone
+                            .send(&format!(
+                                "Agent '{arg}' not found. Use /agents to list."
+                            ))
+                            .await;
+                    }
+                }
+                continue;
             }
 
             if msg.text == "/discord" {
@@ -208,6 +290,7 @@ async fn main() {
                     msg,
                     frontend: cli_clone.clone(),
                     done: Some(done_tx),
+                    agent_override: agent_override.clone(),
                 })
                 .await;
             let _ = done_rx.await;
@@ -224,7 +307,24 @@ async fn main() {
         let (session_key, system_prompt, model, agent_id, channel_name, ws_dir) =
         {
             let s = state.read().expect("State lock poisoned");
-            let (agent_id, sk) = s.resolve_route(&routed.msg);
+            // /switch override > normal routing
+            let (agent_id, sk) =
+                if let Some(ref ov) = routed.agent_override {
+                    let aid = ov.clone();
+                    let sk = core::router::build_session_key(
+                        &aid,
+                        &routed.msg.channel,
+                        &routed.msg.account_id,
+                        &routed.msg.sender_id,
+                        s.mgr
+                            .get(&aid)
+                            .map(|a| a.dm_scope.as_str())
+                            .unwrap_or("per-peer"),
+                    );
+                    (aid, sk)
+                } else {
+                    s.resolve_route(&routed.msg)
+                };
             let agent = s.mgr.get(&agent_id);
             let prompt = agent
                 .map(|a| a.effective_system_prompt())

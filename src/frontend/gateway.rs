@@ -278,6 +278,7 @@ async fn m_send(
         msg,
         frontend: reply.clone() as Arc<dyn Channel>,
         done: Some(done_tx),
+        agent_override: None,
     })
     .await
     .map_err(|_| "Main loop closed")?;

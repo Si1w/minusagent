@@ -85,3 +85,57 @@ impl Intelligence {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_mandeven_workspace() {
+        let workspace = Path::new("workspace/mandeven");
+        let prompts = Path::new("prompts");
+        if !workspace.exists() || !prompts.exists() {
+            return; // skip if not running from project root
+        }
+
+        let intel = Intelligence::new(
+            workspace,
+            prompts,
+            "mandeven".into(),
+            "cli".into(),
+            "test-model".into(),
+        );
+        let prompt = intel.build_prompt();
+
+        // Layer 1: Identity from workspace/mandeven/IDENTITY.md
+        assert!(
+            prompt.contains("Mandeven"),
+            "should contain identity from IDENTITY.md"
+        );
+
+        // Layer 2: Soul from workspace/mandeven/SOUL.md
+        assert!(
+            prompt.contains("# Personality"),
+            "should contain personality section"
+        );
+        assert!(
+            prompt.contains("Direct and to the point"),
+            "should contain soul content"
+        );
+
+        // Layer 7: Runtime context
+        assert!(prompt.contains("Agent ID: mandeven"));
+        assert!(prompt.contains("Channel: cli"));
+
+        // Should NOT use fallback system.md identity
+        assert!(
+            !prompt.starts_with("You are a helpful"),
+            "should use workspace IDENTITY.md, not fallback"
+        );
+
+        println!("--- Mandeven System Prompt ---");
+        println!("{prompt}");
+        println!("--- End ({} chars) ---", prompt.len());
+    }
+}
