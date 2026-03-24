@@ -5,7 +5,7 @@ use anyhow::Result;
 
 use crate::core::node::Node;
 use crate::core::store::SharedStore;
-use crate::intelligence::utils::{extract_body, parse_frontmatter};
+use crate::intelligence::utils::{parse_frontmatter};
 
 /// A discovered memory entry (frontmatter only, body not loaded)
 #[derive(Debug, Clone)]
@@ -89,17 +89,8 @@ impl MemoryStore {
         self.entries = seen.into_values().collect();
     }
 
-    /// Load the full content (body after frontmatter) of a memory by name
-    ///
-    /// # Returns
-    ///
-    /// `None` if the memory is not found or cannot be read.
-    pub fn load_full(&self, name: &str) -> Option<String> {
-        let entry = self.entries.iter().find(|e| e.name == name)?;
-        let content = std::fs::read_to_string(&entry.path).ok()?;
-        Some(extract_body(&content))
-    }
 }
+
 
 /// Node that saves a memory with an LLM-generated TLDR
 ///
@@ -283,30 +274,7 @@ mod tests {
         assert_eq!(store.entries[0].tldr, "User prefers dark mode");
     }
 
-    #[test]
-    fn test_load_full() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("fact.md"),
-            "---\nid: fact\ntldr: A fact\n---\nFull detailed content here.",
-        )
-        .unwrap();
-
-        let mut store = MemoryStore::new(dir.path());
-        store.discover();
-
-        let full = store.load_full("fact").unwrap();
-        assert_eq!(full, "Full detailed content here.");
-    }
-
-    #[test]
-    fn test_load_full_not_found() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::new(dir.path());
-        assert!(store.load_full("nonexistent").is_none());
-    }
-
-    #[test]
+#[test]
     fn test_dir() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(dir.path());

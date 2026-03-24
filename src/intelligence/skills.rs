@@ -5,13 +5,22 @@ use crate::intelligence::utils::{extract_body, parse_frontmatter};
 
 const MAX_SKILLS: usize = 150;
 
-/// A discovered skill parsed from a SKILL.md file
+/// A discovered skill (frontmatter only, body loaded on activation)
 #[derive(Debug, Clone)]
 pub struct Skill {
     pub name: String,
     pub description: String,
-    pub invocation: String,
-    pub body: String,
+    /// Path to the SKILL.md file (body read on demand)
+    pub path: PathBuf,
+}
+
+impl Skill {
+    /// Load the full body (after frontmatter) from the SKILL.md file
+    pub fn load_body(&self) -> Option<String> {
+        let content = std::fs::read_to_string(&self.path).ok()?;
+        let body = extract_body(&content);
+        if body.is_empty() { None } else { Some(body) }
+    }
 }
 
 /// Discovers skills from SKILL.md files across workspace directories
@@ -34,6 +43,8 @@ impl SkillsManager {
     }
 
     /// Discover skills by scanning directories in priority order
+    ///
+    /// Only reads frontmatter (name + description). Body is loaded on demand.
     ///
     /// # Arguments
     ///
@@ -91,11 +102,7 @@ impl SkillsManager {
                     .get("description")
                     .cloned()
                     .unwrap_or_default(),
-                invocation: meta
-                    .get("invocation")
-                    .cloned()
-                    .unwrap_or_default(),
-                body: extract_body(&content),
+                path: skill_md,
             });
         }
 
@@ -124,8 +131,7 @@ mod tests {
         fs::create_dir_all(&skill_dir).unwrap();
         fs::write(
             skill_dir.join("SKILL.md"),
-            "---\nname: greet\ndescription: Say hello\n\
-             invocation: /greet\n---\nGreets the user.",
+            "---\nname: greet\ndescription: Say hello\n---\nGreets the user.",
         )
         .unwrap();
 
@@ -133,6 +139,8 @@ mod tests {
         mgr.discover(&[]);
         assert_eq!(mgr.skills.len(), 1);
         assert_eq!(mgr.skills[0].name, "greet");
-        assert_eq!(mgr.skills[0].body, "Greets the user.");
+        assert_eq!(mgr.skills[0].description, "Say hello");
+        // Body not loaded at discovery
+        assert_eq!(mgr.skills[0].load_body().unwrap(), "Greets the user.");
     }
 }

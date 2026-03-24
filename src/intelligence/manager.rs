@@ -4,9 +4,9 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::intelligence::utils::{extract_body, parse_frontmatter};
+use crate::intelligence::utils::extract_body;
 
-const DEFAULT_AGENT_ID: &str = "main";
+const DEFAULT_AGENT_ID: &str = "mandeven";
 
 static VALID_ID_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-z0-9][a-z0-9_-]{0,63}$").unwrap());
@@ -16,7 +16,7 @@ static INVALID_CHARS_RE: LazyLock<Regex> =
 /// Normalize a raw string into a valid agent ID
 ///
 /// Lowercases, replaces invalid characters with hyphens,
-/// and truncates to 64 chars. Falls back to "main" if empty.
+/// and truncates to 64 chars. Falls back to default agent ID if empty.
 ///
 /// # Arguments
 ///
@@ -47,8 +47,7 @@ pub fn normalize_agent_id(value: &str) -> String {
 pub struct AgentConfig {
     pub id: String,
     pub name: String,
-    pub personality: String,
-    /// Explicit system prompt; if empty, generated from name + personality
+    /// System prompt (identity); if empty, generated from name
     pub system_prompt: String,
     /// Model override; empty means use global default
     pub model: String,
@@ -64,17 +63,9 @@ impl AgentConfig {
     ///
     /// # Returns
     ///
-    /// Explicit `system_prompt` if set, otherwise generated from name + personality.
+    /// The system prompt from AGENT.md body.
     pub fn effective_system_prompt(&self) -> String {
-        if !self.system_prompt.is_empty() {
-            return self.system_prompt.clone();
-        }
-        let mut parts = vec![format!("You are {}.", self.name)];
-        if !self.personality.is_empty() {
-            parts.push(format!("Your personality: {}", self.personality));
-        }
-        parts.push("Answer questions helpfully and stay in character.".into());
-        parts.join(" ")
+        self.system_prompt.clone()
     }
 }
 
@@ -145,9 +136,8 @@ impl AgentManager {
     /// Discover agents from workspace subdirectories
     ///
     /// Each subdirectory containing `AGENT.md` is registered as an agent.
-    /// Frontmatter: `name`, `personality`, `model`, `dm_scope`.
-    /// Body: used as the agent's system prompt (identity).
-    /// Directory name becomes the agent ID.
+    /// Directory name becomes both the agent ID and name.
+    /// The entire file content is used as the system prompt (identity).
     pub fn discover_workspace(&mut self, base_dir: &Path) {
         let entries = match std::fs::read_dir(base_dir) {
             Ok(e) => e,
@@ -164,30 +154,22 @@ impl AgentManager {
                 Err(_) => continue,
             };
 
-            let meta = parse_frontmatter(&content);
             let dir_name =
                 entry.file_name().to_string_lossy().to_string();
+            // If file has frontmatter, use body only; otherwise whole file
             let identity = extract_body(&content);
+            let identity = if identity.is_empty() {
+                content.trim().to_string()
+            } else {
+                identity
+            };
 
             self.register(AgentConfig {
                 id: dir_name.clone(),
-                name: meta
-                    .get("name")
-                    .cloned()
-                    .unwrap_or_else(|| dir_name.clone()),
-                personality: meta
-                    .get("personality")
-                    .cloned()
-                    .unwrap_or_default(),
+                name: dir_name,
                 system_prompt: identity,
-                model: meta
-                    .get("model")
-                    .cloned()
-                    .unwrap_or_default(),
-                dm_scope: meta
-                    .get("dm_scope")
-                    .cloned()
-                    .unwrap_or_else(|| "per-peer".into()),
+                model: String::new(),
+                dm_scope: "per-peer".into(),
                 workspace_dir: entry
                     .path()
                     .to_string_lossy()
@@ -210,8 +192,8 @@ mod tests {
 
     #[test]
     fn test_normalize_empty() {
-        assert_eq!(normalize_agent_id(""), "main");
-        assert_eq!(normalize_agent_id("   "), "main");
+        assert_eq!(normalize_agent_id(""), "mandeven");
+        assert_eq!(normalize_agent_id("   "), "mandeven");
     }
 
     #[test]
@@ -230,31 +212,15 @@ mod tests {
         let config = AgentConfig {
             id: "luna".into(),
             name: "Luna".into(),
-            personality: "warm and curious".into(),
-            system_prompt: String::new(),
+            system_prompt: "You are Luna, warm and curious.".into(),
             model: String::new(),
             dm_scope: "per-peer".into(),
             workspace_dir: String::new(),
         };
-        let prompt = config.effective_system_prompt();
-        assert!(prompt.contains("You are Luna."));
-        assert!(prompt.contains("warm and curious"));
-    }
-
-    #[test]
-    fn test_agent_config_system_prompt_no_personality() {
-        let config = AgentConfig {
-            id: "bot".into(),
-            name: "Bot".into(),
-            personality: String::new(),
-            system_prompt: String::new(),
-            model: String::new(),
-            dm_scope: "per-peer".into(),
-            workspace_dir: String::new(),
-        };
-        let prompt = config.effective_system_prompt();
-        assert!(prompt.contains("You are Bot."));
-        assert!(!prompt.contains("personality"));
+        assert_eq!(
+            config.effective_system_prompt(),
+            "You are Luna, warm and curious."
+        );
     }
 
     #[test]
@@ -263,7 +229,6 @@ mod tests {
         mgr.register(AgentConfig {
             id: "Luna".into(),
             name: "Luna".into(),
-            personality: String::new(),
             system_prompt: String::new(),
             model: String::new(),
             dm_scope: "per-peer".into(),
@@ -280,7 +245,6 @@ mod tests {
         mgr.register(AgentConfig {
             id: "a".into(),
             name: "A".into(),
-            personality: String::new(),
             system_prompt: String::new(),
             model: "custom-model".into(),
             dm_scope: "per-peer".into(),
@@ -289,7 +253,6 @@ mod tests {
         mgr.register(AgentConfig {
             id: "b".into(),
             name: "B".into(),
-            personality: String::new(),
             system_prompt: String::new(),
             model: String::new(),
             dm_scope: "per-peer".into(),

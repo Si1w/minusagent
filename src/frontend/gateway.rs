@@ -10,56 +10,15 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::RoutedMessage;
-use crate::intelligence::manager::{AgentManager, AgentConfig, normalize_agent_id};
-use crate::routing::router::{Binding, BindingTable, build_session_key};
+use crate::intelligence::manager::{AgentConfig, normalize_agent_id};
+use crate::routing::router::{Binding, BindingRouter, Router};
 use crate::frontend::{Channel, UserMessage};
 
 /// Shared application state between main loop and gateway
 pub struct AppState {
-    pub mgr: AgentManager,
-    pub table: BindingTable,
+    pub router: BindingRouter,
     pub sessions: HashSet<String>,
     pub start_time: Instant,
-}
-
-impl AppState {
-    /// Resolve routing for a message
-    ///
-    /// # Arguments
-    ///
-    /// * `msg` - Inbound user message
-    ///
-    /// # Returns
-    ///
-    /// `(agent_id, session_key)` tuple.
-    pub fn resolve_route(&self, msg: &UserMessage) -> (String, String) {
-        let agent_id = self
-            .table
-            .resolve_msg(
-                &msg.channel,
-                &msg.account_id,
-                &msg.guild_id,
-                &msg.sender_id,
-            )
-            .map(|b| b.agent_id.clone())
-            .unwrap_or_else(|| "main".into());
-
-        let dm_scope = self
-            .mgr
-            .get(&agent_id)
-            .map(|a| a.dm_scope.as_str())
-            .unwrap_or("per-peer");
-
-        let session_key = build_session_key(
-            &agent_id,
-            &msg.channel,
-            &msg.account_id,
-            &msg.sender_id,
-            dm_scope,
-        );
-
-        (agent_id, session_key)
-    }
 }
 
 /// Thread-safe shared state handle
@@ -251,22 +210,11 @@ async fn m_send(
     let (agent_id, session_key) = {
         let s = state.read().map_err(|e| e.to_string())?;
         if let Some(explicit) = params["agent_id"].as_str() {
-            let aid = normalize_agent_id(explicit);
-            let dm_scope = s
-                .mgr
-                .get(&aid)
-                .map(|a| a.dm_scope.as_str())
-                .unwrap_or("per-peer");
-            let sk = build_session_key(
-                &aid,
-                &msg.channel,
-                &msg.account_id,
-                &msg.sender_id,
-                dm_scope,
-            );
-            (aid, sk)
+            let result = s.router.resolve_explicit(explicit, &msg);
+            (result.agent_id, result.session_key)
         } else {
-            s.resolve_route(&msg)
+            let result = s.router.resolve(&msg);
+            (result.agent_id, result.session_key)
         }
     };
 
@@ -300,7 +248,7 @@ fn m_bindings_set(
     let mut s = state.write().map_err(|e| e.to_string())?;
     let binding = Binding {
         agent_id: normalize_agent_id(
-            params["agent_id"].as_str().unwrap_or("main"),
+            params["agent_id"].as_str().unwrap_or("mandeven"),
         ),
         tier: params["tier"].as_u64().unwrap_or(5) as u8,
         match_key: params["match_key"]
@@ -313,7 +261,7 @@ fn m_bindings_set(
             .to_string(),
         priority: params["priority"].as_i64().unwrap_or(0) as i32,
     };
-    s.table.add(binding);
+    s.router.table_mut().add(binding);
     Ok(json!({"ok": true}))
 }
 
@@ -322,7 +270,7 @@ fn m_bindings_remove(
     params: &Value,
 ) -> std::result::Result<Value, String> {
     let mut s = state.write().map_err(|e| e.to_string())?;
-    let removed = s.table.remove(
+    let removed = s.router.table_mut().remove(
         params["agent_id"].as_str().unwrap_or(""),
         params["match_key"].as_str().unwrap_or(""),
         params["match_value"].as_str().unwrap_or(""),
@@ -335,7 +283,8 @@ fn m_bindings_list(
 ) -> std::result::Result<Value, String> {
     let s = state.read().map_err(|e| e.to_string())?;
     let bindings: Vec<Value> = s
-        .table
+        .router
+        .table()
         .list()
         .iter()
         .map(|b| {
@@ -356,16 +305,16 @@ fn m_agents_list(
 ) -> std::result::Result<Value, String> {
     let s = state.read().map_err(|e| e.to_string())?;
     let agents: Vec<Value> = s
-        .mgr
+        .router
+        .manager()
         .list()
         .iter()
         .map(|a| {
             json!({
                 "id": a.id,
                 "name": a.name,
-                "model": s.mgr.effective_model(&a.id),
+                "model": s.router.manager().effective_model(&a.id),
                 "dm_scope": a.dm_scope,
-                "personality": a.personality,
             })
         })
         .collect();
@@ -386,10 +335,6 @@ fn m_agents_register(
             .as_str()
             .ok_or("name is required")?
             .to_string(),
-        personality: params["personality"]
-            .as_str()
-            .unwrap_or("")
-            .to_string(),
         system_prompt: params["system_prompt"]
             .as_str()
             .unwrap_or("")
@@ -405,7 +350,7 @@ fn m_agents_register(
             .to_string(),
     };
     let id = normalize_agent_id(&config.id);
-    s.mgr.register(config);
+    s.router.manager_mut().register(config);
     Ok(json!({"ok": true, "id": id}))
 }
 
@@ -413,8 +358,7 @@ fn m_sessions_list(
     state: &SharedState,
 ) -> std::result::Result<Value, String> {
     let s = state.read().map_err(|e| e.to_string())?;
-    let sessions: Vec<&str> =
-        s.sessions.iter().map(|s| s.as_str()).collect();
+    let sessions: Vec<&String> = s.sessions.iter().collect();
     Ok(json!(sessions))
 }
 
@@ -423,10 +367,9 @@ fn m_status(
 ) -> std::result::Result<Value, String> {
     let s = state.read().map_err(|e| e.to_string())?;
     Ok(json!({
-        "running": true,
-        "uptime_seconds": s.start_time.elapsed().as_secs(),
-        "agent_count": s.mgr.list().len(),
-        "binding_count": s.table.list().len(),
-        "session_count": s.sessions.len(),
+        "agents": s.router.manager().list().len(),
+        "bindings": s.router.table().list().len(),
+        "sessions": s.sessions.len(),
+        "uptime_secs": s.start_time.elapsed().as_secs(),
     }))
 }
