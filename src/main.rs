@@ -11,8 +11,8 @@ mod intelligence;
 mod logger;
 mod routing;
 
-use crate::intelligence::manager::{AgentConfig, AgentManager};
-use crate::routing::router::{Binding, BindingTable};
+use crate::intelligence::manager::AgentManager;
+use crate::routing::router::{Binding, BindingRouter, BindingTable, Router};
 use crate::core::session::Session;
 use crate::core::store::{Config, Context, LLMConfig, SharedStore, SystemState};
 use crate::frontend::Channel;
@@ -55,6 +55,7 @@ impl ProviderConfig {
             workspace_dir: std::env::var("WORKSPACE_DIR")
                 .ok()
                 .map(std::path::PathBuf::from)
+                .or_else(|| Some(std::path::PathBuf::from("./workspace")))
                 .filter(|p| p.is_dir()),
         }
     }
@@ -95,34 +96,19 @@ async fn main() {
     // Provider config
     let provider = ProviderConfig::from_env();
 
-    let default_prompt = std::fs::read_to_string("prompts/system.md")
-        .expect("Failed to read prompts/system.md");
-
-    // Shared state: agent manager + binding table
+    // Shared state: BindingRouter (AgentManager + BindingTable)
     let mut mgr = AgentManager::new(provider.default_model.clone());
-    mgr.register(AgentConfig {
-        id: "main".into(),
-        name: "main".into(),
-        personality: String::new(),
-        system_prompt: default_prompt,
-        model: String::new(),
-        dm_scope: "per-peer".into(),
-        workspace_dir: String::new(),
-    });
-    // Auto-discover agents from WORKSPACE_DIR/.agents/
     if let Some(ws) = &provider.workspace_dir {
         mgr.discover_workspace(&ws.join(".agents"));
     }
-
-    // Load routing bindings from WORKSPACE_DIR/routes.json
     let mut table = BindingTable::new();
     if let Some(ws) = &provider.workspace_dir {
         table.load_file(&ws.join("routes.json"));
     }
+    let router = BindingRouter::new(table, mgr, "mandeven");
 
     let state: SharedState = Arc::new(RwLock::new(AppState {
-        mgr,
-        table,
+        router,
         sessions: Default::default(),
         start_time: Instant::now(),
     }));
@@ -161,7 +147,7 @@ async fn main() {
                 let text = {
                     let s = cli_state.read()
                         .expect("State lock poisoned");
-                    let agents = s.mgr.list();
+                    let agents = s.router.manager().list();
                     if agents.is_empty() {
                         "No agents registered.".to_string()
                     } else {
@@ -215,7 +201,7 @@ async fn main() {
                     let found = cli_state
                         .read()
                         .expect("State lock poisoned")
-                        .mgr
+                        .router.manager()
                         .get(&arg)
                         .is_some();
                     if found {
@@ -254,7 +240,7 @@ async fn main() {
                         let text = {
                             let s = cli_state.read()
                                 .expect("State lock poisoned");
-                            let bindings = s.table.list();
+                            let bindings = s.router.table().list();
                             if bindings.is_empty() {
                                 "No bindings. Use: /route <channel> <agent>"
                                     .to_string()
@@ -280,10 +266,10 @@ async fn main() {
                         let removed = {
                             let mut s = cli_state.write()
                                 .expect("State lock poisoned");
-                            let before = s.table.list().len();
-                            s.table.remove_by_key("channel", channel);
-                            s.table.save_file(bindings_path);
-                            before != s.table.list().len()
+                            let before = s.router.table().list().len();
+                            s.router.table_mut().remove_by_key("channel", channel);
+                            s.router.table().save_file(bindings_path);
+                            before != s.router.table().list().len()
                         };
                         if removed {
                             cli_clone
@@ -304,7 +290,7 @@ async fn main() {
                         let msg = {
                             let s = cli_state.read()
                                 .expect("State lock poisoned");
-                            if s.mgr.get(agent).is_none() {
+                            if s.router.manager().get(agent).is_none() {
                                 format!(
                                     "Agent '{agent}' not found. \
                                      Use /agents to list."
@@ -313,16 +299,16 @@ async fn main() {
                                 drop(s);
                                 let mut s = cli_state.write()
                                     .expect("State lock poisoned");
-                                s.table
+                                s.router.table_mut()
                                     .remove_by_key("channel", channel);
-                                s.table.add(Binding {
+                                s.router.table_mut().add(Binding {
                                     agent_id: agent.to_string(),
                                     tier: 4,
                                     match_key: "channel".into(),
                                     match_value: channel.to_string(),
                                     priority: 0,
                                 });
-                                s.table.save_file(bindings_path);
+                                s.router.table().save_file(bindings_path);
                                 format!(
                                     "Bound channel '{channel}' \
                                      → agent '{agent}'"
@@ -427,43 +413,26 @@ async fn main() {
     let mut session_txs =
         HashMap::<String, mpsc::Sender<RoutedMessage>>::new();
 
-    let prompts_dir = std::path::Path::new("prompts");
-
     while let Some(routed) = rx.recv().await {
-        let (session_key, system_prompt, model, agent_id, channel_name, ws_dir) =
-        {
+        let (session_key, system_prompt, model, agent_id, channel_name, ws_dir) = {
             let s = state.read().expect("State lock poisoned");
-            // /switch override > normal routing
-            let (agent_id, sk) =
-                if let Some(ref ov) = routed.agent_override {
-                    let aid = ov.clone();
-                    let sk = routing::router::build_session_key(
-                        &aid,
-                        &routed.msg.channel,
-                        &routed.msg.account_id,
-                        &routed.msg.sender_id,
-                        s.mgr
-                            .get(&aid)
-                            .map(|a| a.dm_scope.as_str())
-                            .unwrap_or("per-peer"),
-                    );
-                    (aid, sk)
-                } else {
-                    s.resolve_route(&routed.msg)
-                };
-            let agent = s.mgr.get(&agent_id);
+            let result = if let Some(ref ov) = routed.agent_override {
+                s.router.resolve_explicit(ov, &routed.msg)
+            } else {
+                s.router.resolve(&routed.msg)
+            };
+            let agent = s.router.manager().get(&result.agent_id);
             let prompt = agent
                 .map(|a| a.effective_system_prompt())
                 .unwrap_or_default();
-            let model = s.mgr.effective_model(&agent_id);
+            let model = s.router.manager().effective_model(&result.agent_id);
             let ch = routed.msg.channel.clone();
-            // Per-agent workspace_dir > global WORKSPACE_DIR
             let ws: Option<PathBuf> = agent
                 .map(|a| a.workspace_dir.clone())
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from)
                 .or(provider.workspace_dir.clone());
-            (sk, prompt, model, agent_id, ch, ws)
+            (result.session_key, prompt, model, result.agent_id, ch, ws)
         };
         {
             let mut s = state.write().expect("State lock poisoned");
@@ -477,7 +446,6 @@ async fn main() {
                     ws_dir.as_ref().map(|ws| {
                         Intelligence::new(
                             ws,
-                            prompts_dir,
                             system_prompt.clone(),
                             agent_id,
                             channel_name,

@@ -356,6 +356,7 @@ impl Session {
                          \x20 /compact                Compact history\n\
                          \n\
                          Intelligence\n\
+                         \x20 /prompt                 Show system prompt\n\
                          \x20 /remember <name> <txt>  Save memory\n\
                          \x20 /<skill> [args]         Invoke skill\n\
                          \n\
@@ -363,9 +364,9 @@ impl Session {
                          \x20 /agents                 List agents\n\
                          \x20 /switch <agent>         Switch agent\n\
                          \x20 /switch off             Default routing\n\
-                         \x20 /route                   List bindings\n\
-                         \x20 /route <ch> <agent>      Bind channel\n\
-                         \x20 /route rm <ch>           Remove binding\n\
+                         \x20 /route                  List bindings\n\
+                         \x20 /route <ch> <agent>     Bind channel\n\
+                         \x20 /route rm <ch>          Remove binding\n\
                          \n\
                          Gateways\n\
                          \x20 /discord                Discord bot\n\
@@ -447,6 +448,18 @@ impl Session {
                         .await;
                 }
             }
+            "/prompt" => {
+                let prompt = self
+                    .store
+                    .state
+                    .intelligence
+                    .as_ref()
+                    .map(|i| i.build_prompt())
+                    .unwrap_or_else(|| {
+                        self.store.context.system_prompt.clone()
+                    });
+                channel.send(&prompt).await;
+            }
             "/remember" => {
                 let rem_parts: Vec<&str> =
                     arg.splitn(2, ' ').collect();
@@ -490,14 +503,15 @@ impl Session {
                 }
             }
             _ => {
-                // Check if cmd matches a skill invocation
+                // Check if cmd matches a skill name (strip leading '/')
+                let skill_name = cmd.strip_prefix('/').unwrap_or(cmd);
                 let skill_body = self
                     .store
                     .state
                     .intelligence
                     .as_ref()
-                    .and_then(|i| i.find_skill(cmd))
-                    .map(|s| s.body.clone());
+                    .and_then(|i| i.find_skill(skill_name))
+                    .and_then(|s| s.load_body());
 
                 if let Some(body) = skill_body {
                     let skill_input = if arg.is_empty() {

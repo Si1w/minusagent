@@ -6,13 +6,11 @@ const MAX_TOTAL_CHARS: usize = 150_000;
 
 /// Bootstrap file names loaded at agent startup
 pub const BOOTSTRAP_FILES: &[&str] = &[
-    "SOUL.md",
     "TOOLS.md",
     "USER.md",
     "HEARTBEAT.md",
     "BOOTSTRAP.md",
     "AGENTS.md",
-    "MEMORY.md",
 ];
 
 /// Loads workspace bootstrap files at agent startup
@@ -109,26 +107,26 @@ mod tests {
     #[test]
     fn test_load_all_full() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("SOUL.md"), "Be kind.").unwrap();
         fs::write(dir.path().join("TOOLS.md"), "Use tools wisely.").unwrap();
+        fs::write(dir.path().join("USER.md"), "User info.").unwrap();
 
         let loader = BootstrapLoader::new(dir.path());
         let result = loader.load_all("full");
-        assert_eq!(result.get("SOUL.md").unwrap(), "Be kind.");
         assert_eq!(result.get("TOOLS.md").unwrap(), "Use tools wisely.");
-        assert!(!result.contains_key("IDENTITY.md"));
+        assert_eq!(result.get("USER.md").unwrap(), "User info.");
+        assert!(!result.contains_key("SOUL.md"));
     }
 
     #[test]
     fn test_load_all_minimal() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("SOUL.md"), "Be kind.").unwrap();
         fs::write(dir.path().join("TOOLS.md"), "Use tools wisely.").unwrap();
+        fs::write(dir.path().join("USER.md"), "User info.").unwrap();
 
         let loader = BootstrapLoader::new(dir.path());
         let result = loader.load_all("minimal");
-        assert!(!result.contains_key("SOUL.md"));
         assert_eq!(result.get("TOOLS.md").unwrap(), "Use tools wisely.");
+        assert!(!result.contains_key("USER.md"));
     }
 
     #[test]

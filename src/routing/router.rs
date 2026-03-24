@@ -13,15 +13,10 @@ pub struct RouteResult {
 /// and what session context to use.
 pub trait Router: Send + Sync {
     /// Resolve routing for a message
-    ///
-    /// # Arguments
-    ///
-    /// * `msg` - Inbound user message with channel/sender metadata
-    ///
-    /// # Returns
-    ///
-    /// Agent ID and session key for this message.
     fn resolve(&self, msg: &UserMessage) -> RouteResult;
+
+    /// Resolve routing with an explicit agent ID override (e.g. /switch)
+    fn resolve_explicit(&self, agent_id: &str, msg: &UserMessage) -> RouteResult;
 }
 
 /// A routing rule that maps a match condition to an agent
@@ -285,59 +280,55 @@ impl BindingRouter {
     }
 }
 
-impl Router for BindingRouter {
-    fn resolve(&self, msg: &UserMessage) -> RouteResult {
-        let agent_id = self
-            .table
-            .resolve_msg(&msg.channel, "", &msg.guild_id, &msg.sender_id)
-            .map(|b| b.agent_id.clone())
-            .unwrap_or_else(|| self.default_agent_id.clone());
-
+impl BindingRouter {
+    fn build_result(&self, agent_id: &str, msg: &UserMessage) -> RouteResult {
         let dm_scope = self
             .mgr
-            .get(&agent_id)
+            .get(agent_id)
             .map(|a| a.dm_scope.as_str())
             .unwrap_or("per-peer");
 
         let session_key = build_session_key(
-            &agent_id,
+            agent_id,
             &msg.channel,
-            "",
+            &msg.account_id,
             &msg.sender_id,
             dm_scope,
         );
 
         RouteResult {
-            agent_id,
+            agent_id: agent_id.to_string(),
             session_key,
         }
     }
 }
 
-/// Single agent, per-sender session isolation
-///
-/// Equivalent to the original hardcoded routing behavior.
-pub struct DefaultRouter {
-    agent_id: String,
-}
-
-impl DefaultRouter {
-    /// Create a default router that always routes to the given agent
-    pub fn new(agent_id: &str) -> Self {
-        Self {
-            agent_id: agent_id.to_string(),
-        }
-    }
-}
-
-impl Router for DefaultRouter {
+impl Router for BindingRouter {
     fn resolve(&self, msg: &UserMessage) -> RouteResult {
-        RouteResult {
-            agent_id: self.agent_id.clone(),
-            session_key: format!("{}:{}", msg.channel, msg.sender_id),
-        }
+        let agent_id = self
+            .table
+            .resolve_msg(
+                &msg.channel,
+                &msg.account_id,
+                &msg.guild_id,
+                &msg.sender_id,
+            )
+            .map(|b| b.agent_id.clone())
+            .unwrap_or_else(|| self.default_agent_id.clone());
+
+        self.build_result(&agent_id, msg)
+    }
+
+    fn resolve_explicit(
+        &self,
+        agent_id: &str,
+        msg: &UserMessage,
+    ) -> RouteResult {
+        let aid = normalize_agent_id(agent_id);
+        self.build_result(&aid, msg)
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -352,24 +343,6 @@ mod tests {
             account_id: String::new(),
             guild_id: String::new(),
         }
-    }
-
-    // DefaultRouter
-
-    #[test]
-    fn test_default_router_resolve() {
-        let router = DefaultRouter::new("main");
-        let result = router.resolve(&msg("cli", "user-1"));
-        assert_eq!(result.agent_id, "main");
-        assert_eq!(result.session_key, "cli:user-1");
-    }
-
-    #[test]
-    fn test_default_router_discord() {
-        let router = DefaultRouter::new("main");
-        let result = router.resolve(&msg("discord", "123456"));
-        assert_eq!(result.agent_id, "main");
-        assert_eq!(result.session_key, "discord:123456");
     }
 
     // BindingTable
@@ -504,7 +477,6 @@ mod tests {
         mgr.register(AgentConfig {
             id: "luna".into(),
             name: "Luna".into(),
-            personality: String::new(),
             system_prompt: String::new(),
             model: String::new(),
             dm_scope: "per-peer".into(),
@@ -513,7 +485,6 @@ mod tests {
         mgr.register(AgentConfig {
             id: "sage".into(),
             name: "Sage".into(),
-            personality: String::new(),
             system_prompt: String::new(),
             model: String::new(),
             dm_scope: "per-channel-peer".into(),
@@ -551,10 +522,29 @@ mod tests {
     fn test_binding_router_fallback() {
         let mgr = AgentManager::new("m".into());
         let bt = BindingTable::new();
-        let router = BindingRouter::new(bt, mgr, "main");
+        let router = BindingRouter::new(bt, mgr, "mandeven");
 
         let r = router.resolve(&msg("cli", "user1"));
-        assert_eq!(r.agent_id, "main");
-        assert_eq!(r.session_key, "agent:main:direct:user1");
+        assert_eq!(r.agent_id, "mandeven");
+        assert_eq!(r.session_key, "agent:mandeven:direct:user1");
+    }
+
+    #[test]
+    fn test_binding_router_explicit() {
+        let mut mgr = AgentManager::new("m".into());
+        mgr.register(AgentConfig {
+            id: "sage".into(),
+            name: "Sage".into(),
+            system_prompt: String::new(),
+            model: String::new(),
+            dm_scope: "per-channel-peer".into(),
+            workspace_dir: String::new(),
+        });
+        let bt = BindingTable::new();
+        let router = BindingRouter::new(bt, mgr, "mandeven");
+
+        let r = router.resolve_explicit("sage", &msg("discord", "user1"));
+        assert_eq!(r.agent_id, "sage");
+        assert_eq!(r.session_key, "agent:sage:discord:direct:user1");
     }
 }

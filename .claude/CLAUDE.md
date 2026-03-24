@@ -9,12 +9,12 @@ Frontend (CLI TUI / Discord / WebSocket Gateway)
        ↓
     UserMessage
        ↓
-main.rs: routing layer (AppState + BindingTable → agent_id + session_key)
+BindingRouter (BindingTable → agent_id → build_session_key)
        ↓
 Session (per session_key, built from AgentConfig)
 ├── Persistence: JSONL + index
-├── Commands: /new /save /load /list /compact /remember /help /exit
-├── Skill invocation: /<skill> routes to discovered SKILL.md body
+├── Commands: /new /save /load /list /compact /prompt /remember /help /exit
+├── Skill activation: /<skill> loads SKILL.md body on demand
 └── Agent CoT loop
        ↓
   Agent.run()
@@ -34,51 +34,56 @@ Session (per session_key, built from AgentConfig)
 src/
 ├── core/           node, agent, llm, session, store, tool
 ├── intelligence/   manager, bootstrap, skills, memory, prompt, utils
-├── routing/        router (BindingTable, build_session_key)
+├── routing/        router (Router trait, BindingRouter, BindingTable)
 ├── frontend/       cli, discord, gateway
-└── main.rs         entry point, routing, session spawn
+└── main.rs         entry point, session spawn
 ```
 
 - **Frontend**: CLI (ratatui TUI) + Discord + WebSocket Gateway. Swappable via `Channel` trait.
-- **Router**: BindingTable (5-tier: peer > guild > account > channel > default) resolves agent_id + session_key. Persisted via `routes.json`.
-- **AgentManager**: Registry of AgentConfig. Auto-discovers agents from `WORKSPACE_DIR/` subdirectories via `AGENT.md`.
+- **Router**: `Router` trait (`resolve`, `resolve_explicit`). `BindingRouter` implements it with a 5-tier BindingTable (peer > guild > account > channel > default) + AgentManager. Default agent: `mandeven`.
+- **AgentManager**: Registry of AgentConfig. Auto-discovers agents from `WORKSPACE_DIR/.agents/` via `AGENT.md`.
 - **Session**: Orchestrator. Owns SharedStore. `turn(input)` routes commands or runs Agent.
 - **Agent**: Stateless CoT loop. `run(store, channel, http)` calls LLM → dispatch tools → repeat.
 - **Node**: Universal building block. `prep(store) → exec() → post(store)`.
 - **SharedStore**: Context (LLM-visible) + SystemState (LLM-invisible + optional Intelligence).
-- **Intelligence**: Dynamic 8-layer system prompt assembly. Enabled per-agent via `workspace_dir`.
+- **Intelligence**: Dynamic 7-layer system prompt assembly. Enabled per-agent via `workspace_dir`.
 
 ## Intelligence
 
-System prompt is rebuilt each turn from 8 layers:
+System prompt is rebuilt each turn from 7 layers:
 
-1. Identity (`AGENT.md` body, or `prompts/system.md` fallback)
-2. Personality (workspace `SOUL.md`)
-3. Tool guidelines (workspace `TOOLS.md`)
-4. Skills (`prompts/skills.md` template + discovered `SKILL.md` files)
-5. Memory (`prompts/memory.md` template + TLDR index from `memory/*.md`)
-6. Bootstrap context (workspace `HEARTBEAT.md`, `BOOTSTRAP.md`, `AGENTS.md`, `USER.md`)
-7. Runtime context (agent_id, model, channel, time)
-8. Channel hints
+1. Identity (`AGENT.md` — plain markdown, no frontmatter)
+2. Tool guidelines (workspace `TOOLS.md`)
+3. Skills (name + description summary from discovered `SKILL.md` files)
+4. Memory (TLDR index from `memory/*.md`)
+5. Bootstrap context (workspace `HEARTBEAT.md`, `BOOTSTRAP.md`, `AGENTS.md`, `USER.md`)
+6. Runtime context (agent_id, model, channel, time)
+7. Channel hints
 
-Memory uses progressive loading: only TLDRs at startup, LLM uses `read_file` for full content.
+Progressive loading:
+- **Skills**: only name + description at startup; full body loaded from file on activation (`/<skill>`)
+- **Memory**: only TLDRs at startup; LLM uses `read_file` for full content
 
 ## Agent Discovery
 
-`WORKSPACE_DIR/.agents/` subdirectories with `AGENT.md` are auto-registered at startup:
+`WORKSPACE_DIR/.agents/` subdirectories with `AGENT.md` are auto-registered at startup.
+Directory name = agent ID. Entire file content = identity (system prompt).
 
 ```
 WORKSPACE_DIR/
 └── .agents/
     └── mandeven/
-        ├── AGENT.md      frontmatter (name, dm_scope, model) + body (identity)
-        ├── SOUL.md       personality
-        └── memory/       progressive memory files
+        ├── AGENT.md      plain markdown identity (no frontmatter)
+        ├── TOOLS.md      tool usage guidelines (optional)
+        ├── memory/       progressive memory files
+        └── skills/       discovered SKILL.md directories
 ```
 
 ## Routing
 
-`routes.json` maps channels/peers to agents. Managed via `/route` command or Gateway JSON-RPC.
+`BindingRouter` wraps `BindingTable` + `AgentManager`. Routes via 5-tier binding resolution, falls back to default agent (`mandeven`).
+
+`routes.json` persists bindings. Managed via `/route` command or Gateway JSON-RPC.
 
 ## CLI Commands
 
@@ -89,7 +94,8 @@ WORKSPACE_DIR/
 | | `/load <id>` | Load session |
 | | `/list` | List sessions |
 | | `/compact` | Compact history |
-| Intelligence | `/remember <name> <txt>` | Save memory (LLM generates TLDR) |
+| Intelligence | `/prompt` | Show system prompt |
+| | `/remember <name> <txt>` | Save memory (LLM generates TLDR) |
 | | `/<skill> [args]` | Invoke discovered skill |
 | Agents | `/agents` | List registered agents |
 | | `/switch <agent>` | Route to specific agent |
@@ -104,7 +110,7 @@ WORKSPACE_DIR/
 
 ## LLM
 
-Global provider config: `base_url`, `api_key`, `context_window`. Per-agent override: `model`. No per-provider backends.
+Global provider config: `base_url`, `api_key`, `context_window`. Per-agent override: `model` (via runtime config). No per-provider backends.
 
 ## Concurrency
 
@@ -114,4 +120,4 @@ CLI waits for session completion via oneshot before showing next prompt.
 
 ## Shared State
 
-`AppState` (AgentManager + BindingTable + session set) wrapped in `Arc<RwLock>`. Shared between main loop and Gateway. Gateway can register agents and modify bindings at runtime via JSON-RPC.
+`AppState` (`BindingRouter` + session set) wrapped in `Arc<RwLock>`. Shared between main loop and Gateway. Gateway can register agents and modify bindings at runtime via JSON-RPC.
