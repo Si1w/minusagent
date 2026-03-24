@@ -359,10 +359,13 @@ impl Session {
                          \x20 /remember <name> <txt>  Save memory\n\
                          \x20 /<skill> [args]         Invoke skill\n\
                          \n\
-                         Agents\n\
+                         Agents & Routing\n\
                          \x20 /agents                 List agents\n\
                          \x20 /switch <agent>         Switch agent\n\
                          \x20 /switch off             Default routing\n\
+                         \x20 /bind                   List bindings\n\
+                         \x20 /bind <ch> <agent>      Bind channel\n\
+                         \x20 /bind rm <ch>           Remove binding\n\
                          \n\
                          Gateways\n\
                          \x20 /discord                Discord bot\n\

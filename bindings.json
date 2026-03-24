@@ -1,0 +1,9 @@
+[
+  {
+    "agent_id": "mandeven",
+    "tier": 4,
+    "match_key": "channel",
+    "match_value": "discord",
+    "priority": 0
+  }
+]

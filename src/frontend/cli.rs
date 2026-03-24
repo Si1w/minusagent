@@ -186,7 +186,7 @@ fn render(state: &mut TuiState, frame: &mut Frame) {
             Style::default().fg(Color::Green),
         ),
         Span::styled(
-            "/agents /switch ",
+            "/agents /switch /bind ",
             Style::default().fg(Color::Yellow),
         ),
         Span::styled(

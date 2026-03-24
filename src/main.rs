@@ -12,7 +12,7 @@ mod logger;
 mod routing;
 
 use crate::intelligence::manager::{AgentConfig, AgentManager};
-use crate::routing::router::BindingTable;
+use crate::routing::router::{Binding, BindingTable};
 use crate::core::session::Session;
 use crate::core::store::{Config, Context, LLMConfig, SharedStore, SystemState};
 use crate::frontend::Channel;
@@ -112,9 +112,13 @@ async fn main() {
     // Auto-discover agents from workspace/ subdirectories
     mgr.discover_workspace(std::path::Path::new("workspace"));
 
+    // Load routing bindings from config file
+    let mut table = BindingTable::new();
+    table.load_file(std::path::Path::new("bindings.json"));
+
     let state: SharedState = Arc::new(RwLock::new(AppState {
         mgr,
-        table: BindingTable::new(),
+        table,
         sessions: Default::default(),
         start_time: Instant::now(),
     }));
@@ -216,6 +220,115 @@ async fn main() {
                             .send(&format!(
                                 "Agent '{arg}' not found. Use /agents to list."
                             ))
+                            .await;
+                    }
+                }
+                continue;
+            }
+
+            // /bind — manage routing bindings
+            // /bind                          list all
+            // /bind <channel> <agent>        add tier-4 binding
+            // /bind rm <channel>             remove tier-4 binding
+            if msg.text.starts_with("/bind") {
+                let args: Vec<&str> = msg.text
+                    .strip_prefix("/bind")
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .collect();
+                let bindings_path =
+                    std::path::Path::new("bindings.json");
+                match args.as_slice() {
+                    // /bind — list
+                    [] => {
+                        let text = {
+                            let s = cli_state.read()
+                                .expect("State lock poisoned");
+                            let bindings = s.table.list();
+                            if bindings.is_empty() {
+                                "No bindings. Use: /bind <channel> <agent>"
+                                    .to_string()
+                            } else {
+                                let mut lines =
+                                    vec!["Bindings:".to_string()];
+                                for b in bindings {
+                                    lines.push(format!(
+                                        "  T{} {} = {} → {}",
+                                        b.tier,
+                                        b.match_key,
+                                        b.match_value,
+                                        b.agent_id,
+                                    ));
+                                }
+                                lines.join("\n")
+                            }
+                        };
+                        cli_clone.send(&text).await;
+                    }
+                    // /bind rm <channel>
+                    ["rm", channel] => {
+                        let removed = {
+                            let mut s = cli_state.write()
+                                .expect("State lock poisoned");
+                            let before = s.table.list().len();
+                            s.table.remove_by_key("channel", channel);
+                            s.table.save_file(bindings_path);
+                            before != s.table.list().len()
+                        };
+                        if removed {
+                            cli_clone
+                                .send(&format!(
+                                    "Removed binding for channel: {channel}"
+                                ))
+                                .await;
+                        } else {
+                            cli_clone
+                                .send(&format!(
+                                    "No binding found for channel: {channel}"
+                                ))
+                                .await;
+                        }
+                    }
+                    // /bind <channel> <agent>
+                    [channel, agent] => {
+                        let msg = {
+                            let s = cli_state.read()
+                                .expect("State lock poisoned");
+                            if s.mgr.get(agent).is_none() {
+                                format!(
+                                    "Agent '{agent}' not found. \
+                                     Use /agents to list."
+                                )
+                            } else {
+                                drop(s);
+                                let mut s = cli_state.write()
+                                    .expect("State lock poisoned");
+                                s.table
+                                    .remove_by_key("channel", channel);
+                                s.table.add(Binding {
+                                    agent_id: agent.to_string(),
+                                    tier: 4,
+                                    match_key: "channel".into(),
+                                    match_value: channel.to_string(),
+                                    priority: 0,
+                                });
+                                s.table.save_file(bindings_path);
+                                format!(
+                                    "Bound channel '{channel}' \
+                                     → agent '{agent}'"
+                                )
+                            }
+                        };
+                        cli_clone.send(&msg).await;
+                    }
+                    _ => {
+                        cli_clone
+                            .send(
+                                "Usage:\n\
+                                 \x20 /bind                  List bindings\n\
+                                 \x20 /bind <channel> <agent>  Bind channel to agent\n\
+                                 \x20 /bind rm <channel>       Remove binding",
+                            )
                             .await;
                     }
                 }
