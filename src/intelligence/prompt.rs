@@ -96,7 +96,7 @@ pub fn format_skills_content(skills: &[Skill]) -> String {
 ///
 /// # Layers
 ///
-/// 1. Identity (IDENTITY.md or prompts/system.md fallback)
+/// 1. Identity (AGENT.md body, or prompts/system.md fallback)
 /// 2. Soul (SOUL.md personality — placed early for stronger influence)
 /// 3. Tool usage guidelines (TOOLS.md)
 /// 4. Skills
@@ -107,6 +107,7 @@ pub fn format_skills_content(skills: &[Skill]) -> String {
 pub fn build_system_prompt(
     mode: &str,
     fragments: &PromptFragments,
+    identity: &str,
     bootstrap: &HashMap<String, String>,
     skills: &[Skill],
     memories: &[MemoryEntry],
@@ -117,12 +118,12 @@ pub fn build_system_prompt(
     let is_full = mode == "full";
     let mut sections: Vec<String> = Vec::new();
 
-    // Layer 1: Identity (raw, no heading — first text has strongest influence)
-    let identity = bootstrap
-        .get("IDENTITY.md")
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .unwrap_or(fragments.system.as_str());
+    // Layer 1: Identity (AGENT.md body > prompts/system.md fallback)
+    let identity = if identity.trim().is_empty() {
+        fragments.system.as_str()
+    } else {
+        identity
+    };
     sections.push(identity.to_string());
 
     // Layer 2: Soul
@@ -232,14 +233,7 @@ mod tests {
     fn test_default_identity() {
         let f = test_fragments();
         let prompt = build_system_prompt(
-            "full",
-            &f,
-            &HashMap::new(),
-            &[],
-            &[],
-            "main",
-            "gpt-4",
-            "cli",
+            "full", &f, "", &HashMap::new(), &[], &[], "main", "gpt-4", "cli",
         );
         assert!(prompt.starts_with("You are a helpful assistant."));
         assert!(prompt.contains("# Memory"));
@@ -247,12 +241,12 @@ mod tests {
     }
 
     #[test]
-    fn test_custom_identity_overrides_fragment() {
+    fn test_agent_identity_overrides_fragment() {
         let f = test_fragments();
-        let mut bs = HashMap::new();
-        bs.insert("IDENTITY.md".into(), "You are Luna.".into());
-        let prompt =
-            build_system_prompt("full", &f, &bs, &[], &[], "luna", "gpt-4", "cli");
+        let prompt = build_system_prompt(
+            "full", &f, "You are Luna.", &HashMap::new(),
+            &[], &[], "luna", "gpt-4", "cli",
+        );
         assert!(prompt.starts_with("You are Luna."));
     }
 
@@ -262,7 +256,7 @@ mod tests {
         let mut bs = HashMap::new();
         bs.insert("SOUL.md".into(), "Be kind.".into());
         let prompt = build_system_prompt(
-            "minimal", &f, &bs, &[], &[], "main", "gpt-4", "cli",
+            "minimal", &f, "", &bs, &[], &[], "main", "gpt-4", "cli",
         );
         assert!(!prompt.contains("Personality"));
         assert!(!prompt.contains("# Memory"));
@@ -277,14 +271,8 @@ mod tests {
             path: "/workspace/memory/dark_mode.md".into(),
         }];
         let prompt = build_system_prompt(
-            "full",
-            &f,
-            &HashMap::new(),
-            &[],
-            &memories,
-            "main",
-            "gpt-4",
-            "cli",
+            "full", &f, "", &HashMap::new(), &[], &memories,
+            "main", "gpt-4", "cli",
         );
         assert!(prompt.contains("## Instructions"));
         assert!(prompt.contains("## Known Memories"));

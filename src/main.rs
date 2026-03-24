@@ -108,6 +108,8 @@ async fn main() {
         dm_scope: "per-peer".into(),
         workspace_dir: String::new(),
     });
+    // Auto-discover agents from workspace/ subdirectories
+    mgr.discover_workspace(std::path::Path::new("workspace"));
 
     let state: SharedState = Arc::new(RwLock::new(AppState {
         mgr,
@@ -352,6 +354,7 @@ async fn main() {
                         Intelligence::new(
                             ws,
                             prompts_dir,
+                            system_prompt.clone(),
                             agent_id,
                             channel_name,
                             model.clone(),

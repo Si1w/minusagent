@@ -20,6 +20,8 @@ pub struct Intelligence {
     fragments: PromptFragments,
     bootstrap_data: HashMap<String, String>,
     skills: Vec<Skill>,
+    /// Identity text from AGENT.md body (Layer 1)
+    identity: String,
     agent_id: String,
     channel: String,
     model: String,
@@ -34,12 +36,14 @@ impl Intelligence {
     ///
     /// * `workspace_dir` - Path to the workspace containing bootstrap files
     /// * `prompts_dir` - Path to the `prompts/` directory for prompt fragments
+    /// * `identity` - Identity text from AGENT.md body (Layer 1)
     /// * `agent_id` - Agent identifier for runtime context
     /// * `channel` - Channel type (cli, discord, etc.)
     /// * `model` - Model name for runtime context
     pub fn new(
         workspace_dir: &Path,
         prompts_dir: &Path,
+        identity: String,
         agent_id: String,
         channel: String,
         model: String,
@@ -60,6 +64,7 @@ impl Intelligence {
             fragments,
             bootstrap_data,
             skills: skills_mgr.skills,
+            identity,
             agent_id,
             channel,
             model,
@@ -76,6 +81,7 @@ impl Intelligence {
         prompt::build_system_prompt(
             "full",
             &self.fragments,
+            &self.identity,
             &self.bootstrap_data,
             &self.skills,
             &self.memory.entries,
@@ -99,19 +105,28 @@ mod tests {
             return; // skip if not running from project root
         }
 
+        // Read AGENT.md body as identity (same as discover_workspace)
+        let agent_md = std::fs::read_to_string(
+            workspace.join("AGENT.md"),
+        )
+        .unwrap();
+        let identity =
+            crate::intelligence::utils::extract_body(&agent_md);
+
         let intel = Intelligence::new(
             workspace,
             prompts,
+            identity,
             "mandeven".into(),
             "cli".into(),
             "test-model".into(),
         );
         let prompt = intel.build_prompt();
 
-        // Layer 1: Identity from workspace/mandeven/IDENTITY.md
+        // Layer 1: Identity from AGENT.md body
         assert!(
             prompt.contains("Mandeven"),
-            "should contain identity from IDENTITY.md"
+            "should contain identity from AGENT.md body"
         );
 
         // Layer 2: Soul from workspace/mandeven/SOUL.md
@@ -131,7 +146,7 @@ mod tests {
         // Should NOT use fallback system.md identity
         assert!(
             !prompt.starts_with("You are a helpful"),
-            "should use workspace IDENTITY.md, not fallback"
+            "should use AGENT.md identity, not fallback"
         );
 
         println!("--- Mandeven System Prompt ---");
