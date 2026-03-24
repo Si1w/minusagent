@@ -306,6 +306,7 @@ pub async fn start_gateway(
                 },
                 frontend: reply,
                 done: None,
+                agent_override: None,
             })
             .await;
     }

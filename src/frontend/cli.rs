@@ -186,6 +186,10 @@ fn render(state: &mut TuiState, frame: &mut Frame) {
             Style::default().fg(Color::Green),
         ),
         Span::styled(
+            "/agents /switch /route ",
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::styled(
             "/help /discord /gateway /exit ",
             Style::default().fg(Color::DarkGray),
         ),

@@ -7,7 +7,6 @@ const MAX_TOTAL_CHARS: usize = 150_000;
 /// Bootstrap file names loaded at agent startup
 pub const BOOTSTRAP_FILES: &[&str] = &[
     "SOUL.md",
-    "IDENTITY.md",
     "TOOLS.md",
     "USER.md",
     "HEARTBEAT.md",
@@ -111,12 +110,13 @@ mod tests {
     fn test_load_all_full() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("SOUL.md"), "Be kind.").unwrap();
-        fs::write(dir.path().join("IDENTITY.md"), "You are helpful.").unwrap();
+        fs::write(dir.path().join("TOOLS.md"), "Use tools wisely.").unwrap();
 
         let loader = BootstrapLoader::new(dir.path());
         let result = loader.load_all("full");
         assert_eq!(result.get("SOUL.md").unwrap(), "Be kind.");
-        assert_eq!(result.get("IDENTITY.md").unwrap(), "You are helpful.");
+        assert_eq!(result.get("TOOLS.md").unwrap(), "Use tools wisely.");
+        assert!(!result.contains_key("IDENTITY.md"));
     }
 
     #[test]

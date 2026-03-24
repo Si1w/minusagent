@@ -1,4 +1,4 @@
-use crate::core::manager::{AgentManager, normalize_agent_id};
+use crate::intelligence::manager::{AgentManager, normalize_agent_id};
 use crate::frontend::UserMessage;
 
 /// Routing decision result
@@ -32,7 +32,7 @@ pub trait Router: Send + Sync {
 /// 3. account_id — route by bot account
 /// 4. channel — route by entire channel type
 /// 5. default — catch-all fallback
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Binding {
     pub agent_id: String,
     pub tier: u8,
@@ -53,6 +53,50 @@ impl BindingTable {
         Self {
             bindings: Vec::new(),
         }
+    }
+
+    /// Load bindings from a JSON file
+    ///
+    /// Each entry is a `Binding` object. Existing bindings are preserved;
+    /// loaded bindings are appended and the table is re-sorted.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to a JSON file containing an array of bindings
+    pub fn load_file(&mut self, path: &std::path::Path) {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let bindings: Vec<Binding> = match serde_json::from_str(&content) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!("Failed to parse {}: {e}", path.display());
+                return;
+            }
+        };
+        for b in bindings {
+            self.add(b);
+        }
+    }
+
+    /// Save all bindings to a JSON file
+    pub fn save_file(&self, path: &std::path::Path) {
+        let json = match serde_json::to_string_pretty(&self.bindings) {
+            Ok(j) => j,
+            Err(e) => {
+                log::warn!("Failed to serialize bindings: {e}");
+                return;
+            }
+        };
+        if let Err(e) = std::fs::write(path, json) {
+            log::warn!("Failed to write {}: {e}", path.display());
+        }
+    }
+
+    /// List all bindings
+    pub fn list(&self) -> &[Binding] {
+        &self.bindings
     }
 
     /// Add a binding and re-sort the table
@@ -88,9 +132,12 @@ impl BindingTable {
         self.bindings.len() < before
     }
 
-    /// List all bindings in match order
-    pub fn list(&self) -> &[Binding] {
-        &self.bindings
+    /// Remove all bindings matching a key-value pair (any agent)
+    pub fn remove_by_key(&mut self, match_key: &str, match_value: &str) -> bool {
+        let before = self.bindings.len();
+        self.bindings
+            .retain(|b| !(b.match_key == match_key && b.match_value == match_value));
+        self.bindings.len() < before
     }
 
     /// Walk tiers 1-5, return first matching binding
@@ -295,7 +342,7 @@ impl Router for DefaultRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::manager::AgentConfig;
+    use crate::intelligence::manager::AgentConfig;
 
     fn msg(channel: &str, sender_id: &str) -> UserMessage {
         UserMessage {
@@ -461,6 +508,7 @@ mod tests {
             system_prompt: String::new(),
             model: String::new(),
             dm_scope: "per-peer".into(),
+            workspace_dir: String::new(),
         });
         mgr.register(AgentConfig {
             id: "sage".into(),
@@ -469,6 +517,7 @@ mod tests {
             system_prompt: String::new(),
             model: String::new(),
             dm_scope: "per-channel-peer".into(),
+            workspace_dir: String::new(),
         });
 
         let mut bt = BindingTable::new();

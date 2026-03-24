@@ -359,6 +359,14 @@ impl Session {
                          \x20 /remember <name> <txt>  Save memory\n\
                          \x20 /<skill> [args]         Invoke skill\n\
                          \n\
+                         Agents & Routing\n\
+                         \x20 /agents                 List agents\n\
+                         \x20 /switch <agent>         Switch agent\n\
+                         \x20 /switch off             Default routing\n\
+                         \x20 /route                   List bindings\n\
+                         \x20 /route <ch> <agent>      Bind channel\n\
+                         \x20 /route rm <ch>           Remove binding\n\
+                         \n\
                          Gateways\n\
                          \x20 /discord                Discord bot\n\
                          \x20 /gateway                WebSocket API\n\

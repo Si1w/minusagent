@@ -10,8 +10,8 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::RoutedMessage;
-use crate::core::manager::{AgentManager, AgentConfig, normalize_agent_id};
-use crate::core::router::{Binding, BindingTable, build_session_key};
+use crate::intelligence::manager::{AgentManager, AgentConfig, normalize_agent_id};
+use crate::routing::router::{Binding, BindingTable, build_session_key};
 use crate::frontend::{Channel, UserMessage};
 
 /// Shared application state between main loop and gateway
@@ -278,6 +278,7 @@ async fn m_send(
         msg,
         frontend: reply.clone() as Arc<dyn Channel>,
         done: Some(done_tx),
+        agent_override: None,
     })
     .await
     .map_err(|_| "Main loop closed")?;
@@ -397,6 +398,10 @@ fn m_agents_register(
         dm_scope: params["dm_scope"]
             .as_str()
             .unwrap_or("per-peer")
+            .to_string(),
+        workspace_dir: params["workspace_dir"]
+            .as_str()
+            .unwrap_or("")
             .to_string(),
     };
     let id = normalize_agent_id(&config.id);

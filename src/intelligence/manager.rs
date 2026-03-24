@@ -1,7 +1,10 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::LazyLock;
 
 use regex::Regex;
+
+use crate::intelligence::utils::{extract_body, parse_frontmatter};
 
 const DEFAULT_AGENT_ID: &str = "main";
 
@@ -52,6 +55,8 @@ pub struct AgentConfig {
     /// Session isolation scope: "main", "per-peer", "per-channel-peer",
     /// "per-account-channel-peer"
     pub dm_scope: String,
+    /// Per-agent workspace directory; overrides global `WORKSPACE_DIR`
+    pub workspace_dir: String,
 }
 
 impl AgentConfig {
@@ -136,6 +141,60 @@ impl AgentManager {
             .map(|a| a.model.clone())
             .unwrap_or_else(|| self.default_model.clone())
     }
+
+    /// Discover agents from workspace subdirectories
+    ///
+    /// Each subdirectory containing `AGENT.md` is registered as an agent.
+    /// Frontmatter: `name`, `personality`, `model`, `dm_scope`.
+    /// Body: used as the agent's system prompt (identity).
+    /// Directory name becomes the agent ID.
+    pub fn discover_workspace(&mut self, base_dir: &Path) {
+        let entries = match std::fs::read_dir(base_dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        for entry in entries.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let agent_md = entry.path().join("AGENT.md");
+            let content = match std::fs::read_to_string(&agent_md) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let meta = parse_frontmatter(&content);
+            let dir_name =
+                entry.file_name().to_string_lossy().to_string();
+            let identity = extract_body(&content);
+
+            self.register(AgentConfig {
+                id: dir_name.clone(),
+                name: meta
+                    .get("name")
+                    .cloned()
+                    .unwrap_or_else(|| dir_name.clone()),
+                personality: meta
+                    .get("personality")
+                    .cloned()
+                    .unwrap_or_default(),
+                system_prompt: identity,
+                model: meta
+                    .get("model")
+                    .cloned()
+                    .unwrap_or_default(),
+                dm_scope: meta
+                    .get("dm_scope")
+                    .cloned()
+                    .unwrap_or_else(|| "per-peer".into()),
+                workspace_dir: entry
+                    .path()
+                    .to_string_lossy()
+                    .to_string(),
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -175,6 +234,7 @@ mod tests {
             system_prompt: String::new(),
             model: String::new(),
             dm_scope: "per-peer".into(),
+            workspace_dir: String::new(),
         };
         let prompt = config.effective_system_prompt();
         assert!(prompt.contains("You are Luna."));
@@ -190,6 +250,7 @@ mod tests {
             system_prompt: String::new(),
             model: String::new(),
             dm_scope: "per-peer".into(),
+            workspace_dir: String::new(),
         };
         let prompt = config.effective_system_prompt();
         assert!(prompt.contains("You are Bot."));
@@ -206,6 +267,7 @@ mod tests {
             system_prompt: String::new(),
             model: String::new(),
             dm_scope: "per-peer".into(),
+            workspace_dir: String::new(),
         });
         assert!(mgr.get("luna").is_some());
         assert!(mgr.get("LUNA").is_some());
@@ -222,6 +284,7 @@ mod tests {
             system_prompt: String::new(),
             model: "custom-model".into(),
             dm_scope: "per-peer".into(),
+            workspace_dir: String::new(),
         });
         mgr.register(AgentConfig {
             id: "b".into(),
@@ -230,6 +293,7 @@ mod tests {
             system_prompt: String::new(),
             model: String::new(),
             dm_scope: "per-peer".into(),
+            workspace_dir: String::new(),
         });
         assert_eq!(mgr.effective_model("a"), "custom-model");
         assert_eq!(mgr.effective_model("b"), "global-model");
