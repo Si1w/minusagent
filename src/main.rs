@@ -114,9 +114,11 @@ async fn main() {
         mgr.discover_workspace(&ws.join(".agents"));
     }
 
-    // Load routing bindings from config file
+    // Load routing bindings from WORKSPACE_DIR/routes.json
     let mut table = BindingTable::new();
-    table.load_file(std::path::Path::new("routes.json"));
+    if let Some(ws) = &provider.workspace_dir {
+        table.load_file(&ws.join("routes.json"));
+    }
 
     let state: SharedState = Arc::new(RwLock::new(AppState {
         mgr,
@@ -133,6 +135,10 @@ async fn main() {
     let gw_tx = tx.clone();
     let gw_state = state.clone();
     let cli_state = state.clone();
+    let routes_path = provider
+        .workspace_dir
+        .as_ref()
+        .map(|ws| ws.join("routes.json"));
     drop(tx);
 
     tokio::spawn(async move {
@@ -238,8 +244,10 @@ async fn main() {
                     .unwrap_or("")
                     .split_whitespace()
                     .collect();
-                let bindings_path =
-                    std::path::Path::new("routes.json");
+                let default_path = PathBuf::from("routes.json");
+                let bindings_path = routes_path
+                    .as_deref()
+                    .unwrap_or(&default_path);
                 match args.as_slice() {
                     // /route — list
                     [] => {
