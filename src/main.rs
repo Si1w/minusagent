@@ -9,9 +9,10 @@ mod core;
 mod frontend;
 mod intelligence;
 mod logger;
+mod routing;
 
-use crate::core::manager::{AgentConfig, AgentManager};
-use crate::core::router::BindingTable;
+use crate::intelligence::manager::{AgentConfig, AgentManager};
+use crate::routing::router::BindingTable;
 use crate::core::session::Session;
 use crate::core::store::{Config, Context, LLMConfig, SharedStore, SystemState};
 use crate::frontend::Channel;
@@ -313,7 +314,7 @@ async fn main() {
             let (agent_id, sk) =
                 if let Some(ref ov) = routed.agent_override {
                     let aid = ov.clone();
-                    let sk = core::router::build_session_key(
+                    let sk = routing::router::build_session_key(
                         &aid,
                         &routed.msg.channel,
                         &routed.msg.account_id,

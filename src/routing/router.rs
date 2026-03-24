@@ -1,4 +1,4 @@
-use crate::core::manager::{AgentManager, normalize_agent_id};
+use crate::intelligence::manager::{AgentManager, normalize_agent_id};
 use crate::frontend::UserMessage;
 
 /// Routing decision result
@@ -295,7 +295,7 @@ impl Router for DefaultRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::manager::AgentConfig;
+    use crate::intelligence::manager::AgentConfig;
 
     fn msg(channel: &str, sender_id: &str) -> UserMessage {
         UserMessage {

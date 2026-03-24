@@ -10,8 +10,8 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::RoutedMessage;
-use crate::core::manager::{AgentManager, AgentConfig, normalize_agent_id};
-use crate::core::router::{Binding, BindingTable, build_session_key};
+use crate::intelligence::manager::{AgentManager, AgentConfig, normalize_agent_id};
+use crate::routing::router::{Binding, BindingTable, build_session_key};
 use crate::frontend::{Channel, UserMessage};
 
 /// Shared application state between main loop and gateway
