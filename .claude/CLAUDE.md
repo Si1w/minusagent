@@ -41,7 +41,7 @@ src/
 
 - **Frontend**: CLI (ratatui TUI) + Discord + WebSocket Gateway. Swappable via `Channel` trait.
 - **Router**: BindingTable (5-tier: peer > guild > account > channel > default) resolves agent_id + session_key. Persisted via `routes.json`.
-- **AgentManager**: Registry of AgentConfig. Auto-discovers agents from `workspace/` subdirectories via `AGENT.md`.
+- **AgentManager**: Registry of AgentConfig. Auto-discovers agents from `WORKSPACE_DIR/` subdirectories via `AGENT.md`.
 - **Session**: Orchestrator. Owns SharedStore. `turn(input)` routes commands or runs Agent.
 - **Agent**: Stateless CoT loop. `run(store, channel, http)` calls LLM → dispatch tools → repeat.
 - **Node**: Universal building block. `prep(store) → exec() → post(store)`.
@@ -65,14 +65,15 @@ Memory uses progressive loading: only TLDRs at startup, LLM uses `read_file` for
 
 ## Agent Discovery
 
-`workspace/` subdirectories with `AGENT.md` are auto-registered at startup:
+`WORKSPACE_DIR/.agents/` subdirectories with `AGENT.md` are auto-registered at startup:
 
 ```
-workspace/
-├── mandeven/
-│   ├── AGENT.md      frontmatter (name, dm_scope, model) + body (identity)
-│   ├── SOUL.md       personality
-│   └── memory/       progressive memory files
+WORKSPACE_DIR/
+└── .agents/
+    └── mandeven/
+        ├── AGENT.md      frontmatter (name, dm_scope, model) + body (identity)
+        ├── SOUL.md       personality
+        └── memory/       progressive memory files
 ```
 
 ## Routing

@@ -109,8 +109,10 @@ async fn main() {
         dm_scope: "per-peer".into(),
         workspace_dir: String::new(),
     });
-    // Auto-discover agents from workspace/ subdirectories
-    mgr.discover_workspace(std::path::Path::new("workspace"));
+    // Auto-discover agents from WORKSPACE_DIR/.agents/
+    if let Some(ws) = &provider.workspace_dir {
+        mgr.discover_workspace(&ws.join(".agents"));
+    }
 
     // Load routing bindings from config file
     let mut table = BindingTable::new();

@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn test_mandeven_workspace() {
-        let workspace = Path::new("workspace/mandeven");
+        let workspace = Path::new("workspace/.agents/mandeven");
         let prompts = Path::new("prompts");
         if !workspace.exists() || !prompts.exists() {
             return; // skip if not running from project root
