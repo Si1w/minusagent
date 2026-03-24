@@ -28,7 +28,7 @@ Five-tier binding table. Bindings are sorted by (tier ASC, priority DESC); first
 
 ## Binding Persistence
 
-`bindings.json` at project root. Loaded at startup, saved on every `/bind` change.
+`routes.json` at project root. Loaded at startup, saved on every `/route` change.
 
 ```json
 [
@@ -47,9 +47,9 @@ Builds a session key from agent ID, channel metadata, and `dm_scope`:
 
 ## CLI commands
 
-- `/bind` — List all bindings.
-- `/bind <channel> <agent>` — Add tier-4 channel binding (persisted).
-- `/bind rm <channel>` — Remove channel binding (persisted).
+- `/route` — List all bindings.
+- `/route <channel> <agent>` — Add tier-4 channel binding (persisted).
+- `/route rm <channel>` — Remove channel binding (persisted).
 - `/switch <agent>` — Override routing for current CLI session.
 - `/switch off` — Restore default routing.
 

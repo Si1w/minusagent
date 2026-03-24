@@ -40,7 +40,7 @@ src/
 ```
 
 - **Frontend**: CLI (ratatui TUI) + Discord + WebSocket Gateway. Swappable via `Channel` trait.
-- **Router**: BindingTable (5-tier: peer > guild > account > channel > default) resolves agent_id + session_key. Persisted via `bindings.json`.
+- **Router**: BindingTable (5-tier: peer > guild > account > channel > default) resolves agent_id + session_key. Persisted via `routes.json`.
 - **AgentManager**: Registry of AgentConfig. Auto-discovers agents from `workspace/` subdirectories via `AGENT.md`.
 - **Session**: Orchestrator. Owns SharedStore. `turn(input)` routes commands or runs Agent.
 - **Agent**: Stateless CoT loop. `run(store, channel, http)` calls LLM → dispatch tools → repeat.
@@ -77,7 +77,7 @@ workspace/
 
 ## Routing
 
-`bindings.json` maps channels/peers to agents. Managed via `/bind` command or Gateway JSON-RPC.
+`routes.json` maps channels/peers to agents. Managed via `/route` command or Gateway JSON-RPC.
 
 ## CLI Commands
 
@@ -93,9 +93,9 @@ workspace/
 | Agents | `/agents` | List registered agents |
 | | `/switch <agent>` | Route to specific agent |
 | | `/switch off` | Restore default routing |
-| | `/bind` | List bindings |
-| | `/bind <ch> <agent>` | Bind channel to agent |
-| | `/bind rm <ch>` | Remove binding |
+| | `/route` | List bindings |
+| | `/route <ch> <agent>` | Bind channel to agent |
+| | `/route rm <ch>` | Remove binding |
 | Gateways | `/discord` | Start Discord bot |
 | | `/gateway` | Start WebSocket gateway |
 | | `/help` | Show commands |

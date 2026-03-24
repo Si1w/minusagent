@@ -114,7 +114,7 @@ async fn main() {
 
     // Load routing bindings from config file
     let mut table = BindingTable::new();
-    table.load_file(std::path::Path::new("bindings.json"));
+    table.load_file(std::path::Path::new("routes.json"));
 
     let state: SharedState = Arc::new(RwLock::new(AppState {
         mgr,
@@ -226,27 +226,27 @@ async fn main() {
                 continue;
             }
 
-            // /bind — manage routing bindings
-            // /bind                          list all
-            // /bind <channel> <agent>        add tier-4 binding
-            // /bind rm <channel>             remove tier-4 binding
-            if msg.text.starts_with("/bind") {
+            // /route — manage routing bindings
+            // /route                          list all
+            // /route <channel> <agent>        add tier-4 binding
+            // /route rm <channel>             remove tier-4 binding
+            if msg.text.starts_with("/route") {
                 let args: Vec<&str> = msg.text
-                    .strip_prefix("/bind")
+                    .strip_prefix("/route")
                     .unwrap_or("")
                     .split_whitespace()
                     .collect();
                 let bindings_path =
-                    std::path::Path::new("bindings.json");
+                    std::path::Path::new("routes.json");
                 match args.as_slice() {
-                    // /bind — list
+                    // /route — list
                     [] => {
                         let text = {
                             let s = cli_state.read()
                                 .expect("State lock poisoned");
                             let bindings = s.table.list();
                             if bindings.is_empty() {
-                                "No bindings. Use: /bind <channel> <agent>"
+                                "No bindings. Use: /route <channel> <agent>"
                                     .to_string()
                             } else {
                                 let mut lines =
@@ -265,7 +265,7 @@ async fn main() {
                         };
                         cli_clone.send(&text).await;
                     }
-                    // /bind rm <channel>
+                    // /route rm <channel>
                     ["rm", channel] => {
                         let removed = {
                             let mut s = cli_state.write()
@@ -289,7 +289,7 @@ async fn main() {
                                 .await;
                         }
                     }
-                    // /bind <channel> <agent>
+                    // /route <channel> <agent>
                     [channel, agent] => {
                         let msg = {
                             let s = cli_state.read()
@@ -325,9 +325,9 @@ async fn main() {
                         cli_clone
                             .send(
                                 "Usage:\n\
-                                 \x20 /bind                  List bindings\n\
-                                 \x20 /bind <channel> <agent>  Bind channel to agent\n\
-                                 \x20 /bind rm <channel>       Remove binding",
+                                 \x20 /route                  List bindings\n\
+                                 \x20 /route <channel> <agent>  Bind channel to agent\n\
+                                 \x20 /route rm <channel>       Remove binding",
                             )
                             .await;
                     }
