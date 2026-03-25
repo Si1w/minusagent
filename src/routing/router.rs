@@ -75,20 +75,6 @@ impl BindingTable {
         }
     }
 
-    /// Save all bindings to a JSON file
-    pub fn save_file(&self, path: &std::path::Path) {
-        let json = match serde_json::to_string_pretty(&self.bindings) {
-            Ok(j) => j,
-            Err(e) => {
-                log::warn!("Failed to serialize bindings: {e}");
-                return;
-            }
-        };
-        if let Err(e) = std::fs::write(path, json) {
-            log::warn!("Failed to write {}: {e}", path.display());
-        }
-    }
-
     /// List all bindings
     pub fn list(&self) -> &[Binding] {
         &self.bindings
@@ -124,14 +110,6 @@ impl BindingTable {
                 && b.match_key == match_key
                 && b.match_value == match_value)
         });
-        self.bindings.len() < before
-    }
-
-    /// Remove all bindings matching a key-value pair (any agent)
-    pub fn remove_by_key(&mut self, match_key: &str, match_value: &str) -> bool {
-        let before = self.bindings.len();
-        self.bindings
-            .retain(|b| !(b.match_key == match_key && b.match_value == match_value));
         self.bindings.len() < before
     }
 

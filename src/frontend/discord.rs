@@ -5,10 +5,11 @@ use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 use tokio::time::{Duration, interval};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+use crate::frontend::gateway::Gateway;
 use crate::frontend::utils::chunk_text;
 use crate::frontend::{Channel, UserMessage};
 
@@ -138,15 +139,15 @@ impl Channel for DiscordReply {
     }
 }
 
-/// Start the Discord gateway connection and route messages to the main loop
+/// Start the Discord gateway connection and dispatch messages
 ///
 /// # Arguments
 ///
 /// * `token` - Discord bot token
-/// * `tx` - Sender to route messages to the main loop
+/// * `gateway` - Shared gateway for dispatch
 pub async fn start_gateway(
     token: String,
-    tx: mpsc::Sender<crate::RoutedMessage>,
+    gateway: Arc<Gateway>,
 ) -> Result<()> {
     let (ws, _) = tokio_tungstenite::connect_async(GATEWAY_URL).await?;
     let (write, mut read) = ws.split();
@@ -293,22 +294,18 @@ pub async fn start_gateway(
             pending_confirms.clone(),
         ));
 
-        let _ = tx
-            .send(crate::RoutedMessage {
-                msg: UserMessage {
-                    text: msg.content,
-                    sender_id: msg.author.id,
-                    channel: "discord".into(),
-                    account_id: bot_user_id.clone(),
-                    guild_id: msg
-                        .guild_id
-                        .unwrap_or_default(),
-                },
-                frontend: reply,
-                done: None,
-                agent_override: None,
-            })
-            .await;
+        let user_msg = UserMessage {
+            text: msg.content,
+            sender_id: msg.author.id,
+            channel: "discord".into(),
+            account_id: bot_user_id.clone(),
+            guild_id: msg.guild_id.unwrap_or_default(),
+        };
+        if let Err(e) =
+            gateway.dispatch(user_msg, reply, None).await
+        {
+            log::error!("Discord dispatch error: {e}");
+        }
     }
 
     Ok(())

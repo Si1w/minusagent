@@ -157,17 +157,24 @@ impl SessionStore {
     }
 
     fn match_id(&self, prefix: &str) -> Result<String> {
-        let matched: Vec<_> = self.index.keys()
-            .filter(|k| k.starts_with(prefix))
+        let matches: Vec<_> = self.index.iter()
+            .filter(|(_, meta)| meta.label.starts_with(prefix))
+            .map(|(k, _)| k)
             .collect();
 
-        match matched.len() {
+        match matches.len() {
             0 => Err(anyhow::anyhow!("Session not found: {prefix}")),
-            1 => Ok(matched[0].clone()),
-            _ => Err(anyhow::anyhow!(
-                "Ambiguous prefix, matches: {}",
-                matched.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
-            )),
+            1 => Ok(matches[0].clone()),
+            _ => {
+                let labels: Vec<_> = matches.iter()
+                    .filter_map(|k| self.index.get(*k))
+                    .map(|m| m.label.as_str())
+                    .collect();
+                Err(anyhow::anyhow!(
+                    "Ambiguous prefix, matches: {}",
+                    labels.join(", ")
+                ))
+            }
         }
     }
 }
@@ -351,7 +358,7 @@ impl Session {
                         "Sessions\n\
                          \x20 /new <label>            New session\n\
                          \x20 /save                   Save session\n\
-                         \x20 /load <id>              Load session\n\
+                         \x20 /load <label>           Load session\n\
                          \x20 /list                   List sessions\n\
                          \x20 /compact                Compact history\n\
                          \n\
@@ -360,19 +367,7 @@ impl Session {
                          \x20 /remember <name> <txt>  Save memory\n\
                          \x20 /<skill> [args]         Invoke skill\n\
                          \n\
-                         Agents & Routing\n\
-                         \x20 /agents                 List agents\n\
-                         \x20 /switch <agent>         Switch agent\n\
-                         \x20 /switch off             Default routing\n\
-                         \x20 /route                  List bindings\n\
-                         \x20 /route <ch> <agent>     Bind channel\n\
-                         \x20 /route rm <ch>          Remove binding\n\
-                         \n\
-                         Gateways\n\
-                         \x20 /discord                Discord bot\n\
-                         \x20 /gateway                WebSocket API\n\
-                         \n\
-                         /help  /exit",
+                         /help",
                     )
                     .await;
             }

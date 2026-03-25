@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod discord;
 pub mod gateway;
+pub mod repl;
 pub mod utils;
 
 /// A message received from the user
