@@ -106,7 +106,7 @@ impl SessionStore {
     ///
     /// # Arguments
     ///
-    /// * `id` - Session ID or unique prefix
+    /// * `label` - Session label or unique prefix
     ///
     /// # Returns
     ///
@@ -114,9 +114,9 @@ impl SessionStore {
     ///
     /// # Errors
     ///
-    /// Returns error if `id` matches zero or multiple sessions, or if JSONL is malformed.
-    fn load(&mut self, id: &str) -> Result<Vec<Message>> {
-        let matched = self.match_id(id)?;
+    /// Returns error if `label` matches zero or multiple sessions, or if JSONL is malformed.
+    fn load(&mut self, label: &str) -> Result<Vec<Message>> {
+        let matched = self.match_label(label)?;
         let path = self.session_path(&matched);
         if !path.exists() {
             self.current_id = Some(matched);
@@ -156,18 +156,25 @@ impl SessionStore {
         Ok(())
     }
 
-    fn match_id(&self, prefix: &str) -> Result<String> {
-        let matched: Vec<_> = self.index.keys()
-            .filter(|k| k.starts_with(prefix))
+    fn match_label(&self, prefix: &str) -> Result<String> {
+        let matches: Vec<_> = self.index.iter()
+            .filter(|(_, meta)| meta.label.starts_with(prefix))
+            .map(|(k, _)| k.clone())
             .collect();
 
-        match matched.len() {
+        match matches.len() {
             0 => Err(anyhow::anyhow!("Session not found: {prefix}")),
-            1 => Ok(matched[0].clone()),
-            _ => Err(anyhow::anyhow!(
-                "Ambiguous prefix, matches: {}",
-                matched.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
-            )),
+            1 => Ok(matches[0].clone()),
+            _ => {
+                let labels: Vec<_> = matches.iter()
+                    .filter_map(|k| self.index.get(k.as_str()))
+                    .map(|m| m.label.as_str())
+                    .collect();
+                Err(anyhow::anyhow!(
+                    "Ambiguous prefix, matches: {}",
+                    labels.join(", ")
+                ))
+            }
         }
     }
 }
@@ -351,7 +358,7 @@ impl Session {
                         "Sessions\n\
                          \x20 /new <label>            New session\n\
                          \x20 /save                   Save session\n\
-                         \x20 /load <id>              Load session\n\
+                         \x20 /load <label>           Load session\n\
                          \x20 /list                   List sessions\n\
                          \x20 /compact                Compact history\n\
                          \n\
@@ -360,19 +367,7 @@ impl Session {
                          \x20 /remember <name> <txt>  Save memory\n\
                          \x20 /<skill> [args]         Invoke skill\n\
                          \n\
-                         Agents & Routing\n\
-                         \x20 /agents                 List agents\n\
-                         \x20 /switch <agent>         Switch agent\n\
-                         \x20 /switch off             Default routing\n\
-                         \x20 /route                  List bindings\n\
-                         \x20 /route <ch> <agent>     Bind channel\n\
-                         \x20 /route rm <ch>          Remove binding\n\
-                         \n\
-                         Gateways\n\
-                         \x20 /discord                Discord bot\n\
-                         \x20 /gateway                WebSocket API\n\
-                         \n\
-                         /help  /exit",
+                         /help",
                     )
                     .await;
             }
@@ -574,7 +569,7 @@ mod tests {
     fn test_session_store_save_and_load() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = SessionStore::new(dir.path()).unwrap();
-        let id = store.create("save-load-test").unwrap();
+        store.create("save-load-test").unwrap();
 
         let history = vec![
             test_message(Role::User, "hello"),
@@ -583,7 +578,7 @@ mod tests {
 
         store.save(&history).unwrap();
 
-        let loaded = store.load(&id).unwrap();
+        let loaded = store.load("save-load-test").unwrap();
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].content.as_deref(), Some("hello"));
         assert_eq!(loaded[1].content.as_deref(), Some("hi there"));
@@ -612,10 +607,9 @@ mod tests {
     fn test_session_store_prefix_match() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = SessionStore::new(dir.path()).unwrap();
-        let id = store.create("prefix-test").unwrap();
+        store.create("prefix-test").unwrap();
 
-        let prefix = &id[..4];
-        let loaded = store.load(prefix).unwrap();
+        let loaded = store.load("prefix").unwrap();
         assert!(loaded.is_empty());
     }
 }

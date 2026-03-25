@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -9,12 +10,76 @@ use tokio::net::TcpListener;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use crate::RoutedMessage;
+use crate::core::session::Session;
+use crate::core::store::{Config, Context, LLMConfig, SharedStore, SystemState};
+use crate::frontend::{Channel, UserMessage};
+use crate::intelligence::Intelligence;
 use crate::intelligence::manager::{AgentConfig, normalize_agent_id};
 use crate::routing::router::{Binding, BindingRouter, Router};
-use crate::frontend::{Channel, UserMessage};
 
-/// Shared application state between main loop and gateway
+/// Global LLM provider config (shared across all agents)
+pub struct ProviderConfig {
+    pub base_url: String,
+    pub api_key: String,
+    pub context_window: usize,
+    pub default_model: String,
+    pub workspace_dir: Option<PathBuf>,
+}
+
+impl ProviderConfig {
+    /// Load provider config from environment variables
+    ///
+    /// # Panics
+    ///
+    /// Panics if required env vars (`LLM_MODEL`, `LLM_BASE_URL`, `LLM_API_KEY`,
+    /// `LLM_CONTEXT_WINDOW`) are missing or malformed.
+    pub fn from_env() -> Self {
+        Self {
+            default_model: std::env::var("LLM_MODEL")
+                .expect("LLM_MODEL not set"),
+            base_url: std::env::var("LLM_BASE_URL")
+                .expect("LLM_BASE_URL not set"),
+            api_key: std::env::var("LLM_API_KEY")
+                .expect("LLM_API_KEY not set"),
+            context_window: std::env::var("LLM_CONTEXT_WINDOW")
+                .expect("LLM_CONTEXT_WINDOW not set")
+                .parse()
+                .expect("LLM_CONTEXT_WINDOW must be a number"),
+            workspace_dir: std::env::var("WORKSPACE_DIR")
+                .ok()
+                .map(PathBuf::from)
+                .or_else(|| Some(PathBuf::from("./workspace")))
+                .filter(|p| p.is_dir()),
+        }
+    }
+
+    fn build_store(
+        &self,
+        system_prompt: String,
+        model: String,
+        intelligence: Option<Intelligence>,
+    ) -> SharedStore {
+        SharedStore {
+            context: Context {
+                system_prompt,
+                history: Vec::new(),
+            },
+            state: SystemState {
+                config: Config {
+                    llm: LLMConfig {
+                        model,
+                        base_url: self.base_url.clone(),
+                        api_key: self.api_key.clone(),
+                        context_window: self.context_window,
+                    },
+                },
+                intelligence,
+            },
+        }
+    }
+}
+
+/// Shared application state between gateway and frontends
 pub struct AppState {
     pub router: BindingRouter,
     pub sessions: HashSet<String>,
@@ -23,6 +88,165 @@ pub struct AppState {
 
 /// Thread-safe shared state handle
 pub type SharedState = Arc<RwLock<AppState>>;
+
+/// Message passed to a session task
+struct SessionMessage {
+    text: String,
+    frontend: Arc<dyn Channel>,
+    done: Option<oneshot::Sender<()>>,
+}
+
+/// Result of a dispatch operation
+pub struct DispatchResult {
+    pub agent_id: String,
+    pub session_key: String,
+    pub done: oneshot::Receiver<()>,
+}
+
+/// Central dispatcher: routes messages and manages session lifecycle
+///
+/// Owns the shared state (router + agent manager), provider config,
+/// and the per-session task pool.
+pub struct Gateway {
+    state: SharedState,
+    provider: ProviderConfig,
+    session_txs: Mutex<HashMap<String, mpsc::Sender<SessionMessage>>>,
+}
+
+impl Gateway {
+    /// Create a new gateway
+    pub fn new(state: SharedState, provider: ProviderConfig) -> Self {
+        Self {
+            state,
+            provider,
+            session_txs: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Read access to the shared state
+    pub fn state(&self) -> &SharedState {
+        &self.state
+    }
+
+    /// Dispatch a user message: route → find/create session → forward
+    ///
+    /// # Arguments
+    ///
+    /// * `msg` - The user message
+    /// * `frontend` - Channel to send responses through
+    /// * `agent_override` - Force routing to a specific agent
+    ///
+    /// # Returns
+    ///
+    /// Dispatch result with agent_id, session_key, and completion receiver.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if the session task has unexpectedly closed.
+    pub async fn dispatch(
+        &self,
+        msg: UserMessage,
+        frontend: Arc<dyn Channel>,
+        agent_override: Option<&str>,
+    ) -> Result<DispatchResult> {
+        // 1. Resolve routing
+        let (session_key, system_prompt, model, agent_id, channel_name, ws_dir) =
+        {
+            let s = self.state.read().expect("State lock poisoned");
+            let result = if let Some(ov) = agent_override {
+                s.router.resolve_explicit(ov, &msg)
+            } else {
+                s.router.resolve(&msg)
+            };
+            let agent = s.router.manager().get(&result.agent_id);
+            let prompt = agent
+                .map(|a| a.effective_system_prompt())
+                .unwrap_or_default();
+            let model =
+                s.router.manager().effective_model(&result.agent_id);
+            let ch = msg.channel.clone();
+            let ws: Option<PathBuf> = agent
+                .map(|a| a.workspace_dir.clone())
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .or(self.provider.workspace_dir.clone());
+            (result.session_key, prompt, model, result.agent_id, ch, ws)
+        };
+
+        // 2. Track session
+        {
+            let mut s =
+                self.state.write().expect("State lock poisoned");
+            s.sessions.insert(session_key.clone());
+        }
+
+        // 3. Get or create session task
+        let (done_tx, done_rx) = oneshot::channel();
+        let text = msg.text;
+
+        let session_tx = {
+            let mut txs = self.session_txs.lock().await;
+            txs.entry(session_key.clone())
+                .or_insert_with(|| {
+                    let intelligence = ws_dir.as_ref().map(|ws| {
+                        Intelligence::new(
+                            ws,
+                            system_prompt.clone(),
+                            agent_id.clone(),
+                            channel_name,
+                            model.clone(),
+                        )
+                    });
+                    let initial_prompt = intelligence
+                        .as_ref()
+                        .map(|i| i.build_prompt())
+                        .unwrap_or(system_prompt);
+                    let store = self.provider.build_store(
+                        initial_prompt,
+                        model,
+                        intelligence,
+                    );
+                    let (stx, mut srx) =
+                        mpsc::channel::<SessionMessage>(8);
+                    tokio::spawn(async move {
+                        let mut session = Session::new(store)
+                            .expect("Failed to create session");
+                        while let Some(msg) = srx.recv().await {
+                            if let Err(e) = session
+                                .turn(&msg.text, &msg.frontend)
+                                .await
+                            {
+                                msg.frontend
+                                    .send(&format!("Error: {e}"))
+                                    .await;
+                            }
+                            if let Some(done) = msg.done {
+                                let _ = done.send(());
+                            }
+                        }
+                    });
+                    stx
+                })
+                .clone()
+        };
+
+        // 4. Send to session
+        session_tx
+            .send(SessionMessage {
+                text,
+                frontend,
+                done: Some(done_tx),
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("Session task closed"))?;
+
+        Ok(DispatchResult {
+            agent_id,
+            session_key,
+            done: done_rx,
+        })
+    }
+}
 
 /// Channel implementation that buffers all output for JSON-RPC response
 struct GatewayReply {
@@ -69,21 +293,19 @@ impl Channel for GatewayReply {
     async fn flush(&self) {}
 }
 
-/// Start the WebSocket gateway server
+/// Start the WebSocket server
 ///
 /// # Arguments
 ///
-/// * `state` - Shared application state
-/// * `tx` - Channel to route messages into the main loop
+/// * `gateway` - Shared gateway for dispatch and state access
 /// * `host` - Bind address
 /// * `port` - Bind port
 ///
 /// # Errors
 ///
 /// Returns error if the TCP listener fails to bind.
-pub async fn start_gateway(
-    state: SharedState,
-    tx: mpsc::Sender<RoutedMessage>,
+pub async fn start_ws(
+    gateway: Arc<Gateway>,
     host: &str,
     port: u16,
 ) -> Result<()> {
@@ -94,14 +316,16 @@ pub async fn start_gateway(
         let (stream, addr) = listener.accept().await?;
         log::debug!("Gateway: new connection from {addr}");
 
-        let state = state.clone();
-        let tx = tx.clone();
+        let gateway = gateway.clone();
 
         tokio::spawn(async move {
-            let ws = match tokio_tungstenite::accept_async(stream).await {
+            let ws = match tokio_tungstenite::accept_async(stream).await
+            {
                 Ok(ws) => ws,
                 Err(e) => {
-                    log::error!("Gateway: WebSocket handshake failed: {e}");
+                    log::error!(
+                        "Gateway: WebSocket handshake failed: {e}"
+                    );
                     return;
                 }
             };
@@ -116,9 +340,10 @@ pub async fn start_gateway(
                     _ => continue,
                 };
 
-                let resp = dispatch(&state, &tx, &text).await;
+                let resp = handle_rpc(&gateway, &text).await;
                 if let Some(resp) = resp {
-                    let msg = WsMessage::Text(resp.to_string().into());
+                    let msg =
+                        WsMessage::Text(resp.to_string().into());
                     if write.lock().await.send(msg).await.is_err() {
                         break;
                     }
@@ -130,9 +355,8 @@ pub async fn start_gateway(
     }
 }
 
-async fn dispatch(
-    state: &SharedState,
-    tx: &mpsc::Sender<RoutedMessage>,
+async fn handle_rpc(
+    gateway: &Arc<Gateway>,
     raw: &str,
 ) -> Option<Value> {
     let req: Value = match serde_json::from_str(raw) {
@@ -151,14 +375,14 @@ async fn dispatch(
     let params = req.get("params").cloned().unwrap_or(json!({}));
 
     let result = match method {
-        "send" => m_send(state, tx, &params).await,
-        "bindings.set" => m_bindings_set(state, &params),
-        "bindings.remove" => m_bindings_remove(state, &params),
-        "bindings.list" => m_bindings_list(state),
-        "agents.list" => m_agents_list(state),
-        "agents.register" => m_agents_register(state, &params),
-        "sessions.list" => m_sessions_list(state),
-        "status" => m_status(state),
+        "send" => m_send(gateway, &params).await,
+        "bindings.set" => m_bindings_set(gateway, &params),
+        "bindings.remove" => m_bindings_remove(gateway, &params),
+        "bindings.list" => m_bindings_list(gateway),
+        "agents.list" => m_agents_list(gateway),
+        "agents.register" => m_agents_register(gateway, &params),
+        "sessions.list" => m_sessions_list(gateway),
+        "status" => m_status(gateway),
         _ => Err(format!("Unknown method: {method}")),
     };
 
@@ -173,8 +397,7 @@ async fn dispatch(
 }
 
 async fn m_send(
-    state: &SharedState,
-    tx: &mpsc::Sender<RoutedMessage>,
+    gateway: &Arc<Gateway>,
     params: &Value,
 ) -> std::result::Result<Value, String> {
     let text = params["text"]
@@ -189,7 +412,6 @@ async fn m_send(
         .as_str()
         .unwrap_or("ws-client")
         .to_string();
-
     let account_id = params["account_id"]
         .as_str()
         .unwrap_or("")
@@ -207,45 +429,30 @@ async fn m_send(
         guild_id,
     };
 
-    let (agent_id, session_key) = {
-        let s = state.read().map_err(|e| e.to_string())?;
-        if let Some(explicit) = params["agent_id"].as_str() {
-            let result = s.router.resolve_explicit(explicit, &msg);
-            (result.agent_id, result.session_key)
-        } else {
-            let result = s.router.resolve(&msg);
-            (result.agent_id, result.session_key)
-        }
-    };
-
-    // Create reply channel
+    let agent_override = params["agent_id"].as_str();
     let reply = Arc::new(GatewayReply::new());
-    let (done_tx, done_rx) = oneshot::channel();
 
-    tx.send(RoutedMessage {
-        msg,
-        frontend: reply.clone() as Arc<dyn Channel>,
-        done: Some(done_tx),
-        agent_override: None,
-    })
-    .await
-    .map_err(|_| "Main loop closed")?;
+    let result = gateway
+        .dispatch(msg, reply.clone() as Arc<dyn Channel>, agent_override)
+        .await
+        .map_err(|e| e.to_string())?;
 
-    let _ = done_rx.await;
+    let _ = result.done.await;
     let reply_text = reply.take_buffer().await;
 
     Ok(json!({
-        "agent_id": agent_id,
-        "session_key": session_key,
+        "agent_id": result.agent_id,
+        "session_key": result.session_key,
         "reply": reply_text,
     }))
 }
 
 fn m_bindings_set(
-    state: &SharedState,
+    gateway: &Arc<Gateway>,
     params: &Value,
 ) -> std::result::Result<Value, String> {
-    let mut s = state.write().map_err(|e| e.to_string())?;
+    let mut s =
+        gateway.state().write().map_err(|e| e.to_string())?;
     let binding = Binding {
         agent_id: normalize_agent_id(
             params["agent_id"].as_str().unwrap_or("mandeven"),
@@ -266,10 +473,11 @@ fn m_bindings_set(
 }
 
 fn m_bindings_remove(
-    state: &SharedState,
+    gateway: &Arc<Gateway>,
     params: &Value,
 ) -> std::result::Result<Value, String> {
-    let mut s = state.write().map_err(|e| e.to_string())?;
+    let mut s =
+        gateway.state().write().map_err(|e| e.to_string())?;
     let removed = s.router.table_mut().remove(
         params["agent_id"].as_str().unwrap_or(""),
         params["match_key"].as_str().unwrap_or(""),
@@ -279,9 +487,9 @@ fn m_bindings_remove(
 }
 
 fn m_bindings_list(
-    state: &SharedState,
+    gateway: &Arc<Gateway>,
 ) -> std::result::Result<Value, String> {
-    let s = state.read().map_err(|e| e.to_string())?;
+    let s = gateway.state().read().map_err(|e| e.to_string())?;
     let bindings: Vec<Value> = s
         .router
         .table()
@@ -301,9 +509,9 @@ fn m_bindings_list(
 }
 
 fn m_agents_list(
-    state: &SharedState,
+    gateway: &Arc<Gateway>,
 ) -> std::result::Result<Value, String> {
-    let s = state.read().map_err(|e| e.to_string())?;
+    let s = gateway.state().read().map_err(|e| e.to_string())?;
     let agents: Vec<Value> = s
         .router
         .manager()
@@ -322,10 +530,11 @@ fn m_agents_list(
 }
 
 fn m_agents_register(
-    state: &SharedState,
+    gateway: &Arc<Gateway>,
     params: &Value,
 ) -> std::result::Result<Value, String> {
-    let mut s = state.write().map_err(|e| e.to_string())?;
+    let mut s =
+        gateway.state().write().map_err(|e| e.to_string())?;
     let config = AgentConfig {
         id: params["id"]
             .as_str()
@@ -355,17 +564,17 @@ fn m_agents_register(
 }
 
 fn m_sessions_list(
-    state: &SharedState,
+    gateway: &Arc<Gateway>,
 ) -> std::result::Result<Value, String> {
-    let s = state.read().map_err(|e| e.to_string())?;
+    let s = gateway.state().read().map_err(|e| e.to_string())?;
     let sessions: Vec<&String> = s.sessions.iter().collect();
     Ok(json!(sessions))
 }
 
 fn m_status(
-    state: &SharedState,
+    gateway: &Arc<Gateway>,
 ) -> std::result::Result<Value, String> {
-    let s = state.read().map_err(|e| e.to_string())?;
+    let s = gateway.state().read().map_err(|e| e.to_string())?;
     Ok(json!({
         "agents": s.router.manager().list().len(),
         "bindings": s.router.table().list().len(),
