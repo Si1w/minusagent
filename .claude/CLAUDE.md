@@ -35,6 +35,7 @@ src/
 ├── core/           node, agent, llm, session, store, tool
 ├── intelligence/   manager, bootstrap, skills, memory, prompt, utils
 ├── routing/        router (Router trait, BindingRouter, BindingTable)
+├── scheduler/      heartbeat, cron (background tasks with lane priority)
 ├── frontend/       cli, discord, gateway
 └── main.rs         entry point, session spawn
 ```
@@ -47,6 +48,7 @@ src/
 - **Node**: Universal building block. `prep(store) → exec() → post(store)`.
 - **SharedStore**: Context (LLM-visible) + SystemState (LLM-invisible + optional Intelligence).
 - **Intelligence**: Dynamic 7-layer system prompt assembly. Enabled per-agent via `workspace_dir`.
+- **Scheduler**: Heartbeat (per-session, lane-priority yield) + Cron (global, 3 schedule types). Background output via global buffer, drained in TUI event loop.
 
 ## Intelligence
 
@@ -103,6 +105,11 @@ WORKSPACE_DIR/
 | | `/route` | List bindings |
 | | `/route <ch> <agent>` | Bind channel to agent |
 | | `/route rm <ch>` | Remove binding |
+| Scheduler | `/heartbeat` | Heartbeat status |
+| | `/trigger` | Manual heartbeat |
+| | `/cron` | List cron jobs |
+| | `/cron trigger <id>` | Trigger a cron job |
+| | `/cron reload` | Reload CRON.json |
 | Gateways | `/discord` | Start Discord bot |
 | | `/gateway` | Start WebSocket gateway |
 | | `/help` | Show commands |
@@ -111,6 +118,18 @@ WORKSPACE_DIR/
 ## LLM
 
 Global provider config: `base_url`, `api_key`, `context_window`. Per-agent override: `model` (via runtime config). No per-provider backends.
+
+## Scheduler
+
+Per-session lane lock (`Arc<tokio::sync::Mutex<()>>`) ensures user turns always win:
+- `Session::turn()` → `lock().await` (blocking)
+- `HeartbeatRunner::execute()` → `try_lock()` (non-blocking, yields if user active)
+
+**Heartbeat**: Per-session. Spawned in `Gateway::dispatch()` when `HEARTBEAT.md` exists. Polls every 1s, runs when interval (1800s), active hours (9-22), and preconditions met. `HEARTBEAT_OK` suppresses output.
+
+**Cron**: Global. Spawned in `Gateway::new()` from `CRON.json`. Three schedule types: `at`, `every`, `cron`. Auto-disables after 5 consecutive errors. Run log: `cron-runs.jsonl`.
+
+**Output**: Background results pushed to global buffer (`scheduler::push_bg_output`), drained by TUI event loop every 50ms frame.
 
 ## Concurrency
 

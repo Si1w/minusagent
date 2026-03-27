@@ -16,6 +16,9 @@ use crate::frontend::{Channel, UserMessage};
 use crate::intelligence::Intelligence;
 use crate::intelligence::manager::{AgentConfig, normalize_agent_id};
 use crate::routing::router::{Binding, BindingRouter, Router};
+use crate::scheduler::LaneLock;
+use crate::scheduler::cron::{CronHandle, CronJobStatus};
+use crate::scheduler::heartbeat::HeartbeatHandle;
 
 /// Global LLM provider config (shared across all agents)
 pub struct ProviderConfig {
@@ -111,21 +114,54 @@ pub struct Gateway {
     state: SharedState,
     provider: ProviderConfig,
     session_txs: Mutex<HashMap<String, mpsc::Sender<SessionMessage>>>,
+    heartbeat_handles: Mutex<HashMap<String, HeartbeatHandle>>,
+    cron_handle: Mutex<Option<CronHandle>>,
 }
 
 impl Gateway {
     /// Create a new gateway
     pub fn new(state: SharedState, provider: ProviderConfig) -> Self {
+        // Start cron service if CRON.json exists
+        let cron_handle = provider.workspace_dir.as_ref().map(|ws| {
+            let cron_file = ws.join("CRON.json");
+            if cron_file.exists() {
+                let llm_config = LLMConfig {
+                    model: provider.default_model.clone(),
+                    base_url: provider.base_url.clone(),
+                    api_key: provider.api_key.clone(),
+                    context_window: provider.context_window,
+                };
+                Some(crate::scheduler::cron::spawn(cron_file, llm_config))
+            } else {
+                None
+            }
+        }).flatten();
+
         Self {
             state,
             provider,
             session_txs: Mutex::new(HashMap::new()),
+            heartbeat_handles: Mutex::new(HashMap::new()),
+            cron_handle: Mutex::new(cron_handle),
         }
     }
 
     /// Read access to the shared state
     pub fn state(&self) -> &SharedState {
         &self.state
+    }
+
+    /// Get the cron handle
+    pub async fn cron_handle(&self) -> Option<CronHandle> {
+        self.cron_handle.lock().await.clone()
+    }
+
+    /// List cron jobs
+    pub async fn cron_list_jobs(&self) -> Vec<CronJobStatus> {
+        match self.cron_handle.lock().await.as_ref() {
+            Some(h) => h.list_jobs().await,
+            None => Vec::new(),
+        }
     }
 
     /// Dispatch a user message: route → find/create session → forward
@@ -186,48 +222,99 @@ impl Gateway {
 
         let session_tx = {
             let mut txs = self.session_txs.lock().await;
-            txs.entry(session_key.clone())
-                .or_insert_with(|| {
-                    let intelligence = ws_dir.as_ref().map(|ws| {
-                        Intelligence::new(
-                            ws,
-                            system_prompt.clone(),
-                            agent_id.clone(),
-                            channel_name,
-                            model.clone(),
+            if let Some(tx) = txs.get(&session_key) {
+                if tx.is_closed() {
+                    txs.remove(&session_key);
+                }
+            }
+
+            if let Some(tx) = txs.get(&session_key) {
+                tx.clone()
+            } else {
+                let intelligence = ws_dir.as_ref().map(|ws| {
+                    Intelligence::new(
+                        ws,
+                        system_prompt.clone(),
+                        agent_id.clone(),
+                        channel_name,
+                        model.clone(),
+                    )
+                });
+                let initial_prompt = intelligence
+                    .as_ref()
+                    .map(|i| i.build_prompt())
+                    .unwrap_or(system_prompt.clone());
+                let store = self.provider.build_store(
+                    initial_prompt,
+                    model.clone(),
+                    intelligence,
+                );
+
+                let lane_lock =
+                    LaneLock::new(tokio::sync::Mutex::new(()));
+
+                // Spawn heartbeat before session so we can pass
+                // the handle into Session
+                let hb_handle = ws_dir
+                    .as_ref()
+                    .filter(|ws| ws.join("HEARTBEAT.md").exists())
+                    .map(|ws| {
+                        let llm_config = LLMConfig {
+                            model: model.clone(),
+                            base_url: self
+                                .provider
+                                .base_url
+                                .clone(),
+                            api_key: self
+                                .provider
+                                .api_key
+                                .clone(),
+                            context_window: self
+                                .provider
+                                .context_window,
+                        };
+                        crate::scheduler::heartbeat::spawn(
+                            ws.clone(),
+                            lane_lock.clone(),
+                            llm_config,
+                            system_prompt,
+                            tokio::time::Duration::from_secs(1800),
+                            (9, 22),
                         )
                     });
-                    let initial_prompt = intelligence
-                        .as_ref()
-                        .map(|i| i.build_prompt())
-                        .unwrap_or(system_prompt);
-                    let store = self.provider.build_store(
-                        initial_prompt,
-                        model,
-                        intelligence,
-                    );
-                    let (stx, mut srx) =
-                        mpsc::channel::<SessionMessage>(8);
-                    tokio::spawn(async move {
-                        let mut session = Session::new(store)
+
+                // Store handle in gateway for REPL access
+                if let Some(ref h) = hb_handle {
+                    self.heartbeat_handles
+                        .lock()
+                        .await
+                        .insert(session_key.clone(), h.clone());
+                }
+
+                let lock = lane_lock.clone();
+                let (stx, mut srx) =
+                    mpsc::channel::<SessionMessage>(8);
+                tokio::spawn(async move {
+                    let mut session =
+                        Session::new(store, lock, hb_handle)
                             .expect("Failed to create session");
-                        while let Some(msg) = srx.recv().await {
-                            if let Err(e) = session
-                                .turn(&msg.text, &msg.frontend)
-                                .await
-                            {
-                                msg.frontend
-                                    .send(&format!("Error: {e}"))
-                                    .await;
-                            }
-                            if let Some(done) = msg.done {
-                                let _ = done.send(());
-                            }
+                    while let Some(msg) = srx.recv().await {
+                        if let Err(e) = session
+                            .turn(&msg.text, &msg.frontend)
+                            .await
+                        {
+                            msg.frontend
+                                .send(&format!("Error: {e}"))
+                                .await;
                         }
-                    });
-                    stx
-                })
-                .clone()
+                        if let Some(done) = msg.done {
+                            let _ = done.send(());
+                        }
+                    }
+                });
+                txs.insert(session_key.clone(), stx.clone());
+                stx
+            }
         };
 
         // 4. Send to session

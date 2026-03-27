@@ -21,6 +21,7 @@ Inbound message metadata used for both display and routing:
 - **text** — Message content
 - **sender_id** — User identifier
 - **channel** — Channel type (e.g. "cli", "discord")
+- **account_id** — Bot account identifier (empty for CLI)
 - **guild_id** — Server/guild identifier (empty for non-guild channels)
 
 ## CLI (ratatui TUI)
@@ -32,7 +33,7 @@ Inbound message metadata used for both display and routing:
 
 ## Discord
 
-- Gateway WebSocket connection with heartbeat.
+- Gateway WebSocket connection with heartbeat, resume, and reconnection.
 - Buffers streaming chunks, flushes on `flush()`.
 - Real y/n confirmation via `PendingConfirms` (shared oneshot map between gateway and DiscordReply).
 - Chunks messages at 2000 chars.
@@ -48,10 +49,11 @@ Inbound message metadata used for both display and routing:
 
 No-op implementation used internally for compaction LLM calls.
 
-## Routing (main.rs)
+## REPL (repl.rs)
 
 - CLI always starts. `/discord` and `/gateway` spawn at runtime.
-- Messages routed via shared `AppState` (BindingTable + AgentManager).
+- Messages dispatched through Gateway (BindingRouter + AgentManager).
 - Session key built from agent's `dm_scope` (e.g. `agent:luna:direct:user1`).
 - Each session key gets a dedicated tokio task (concurrent across sessions).
 - CLI waits for session completion via oneshot before showing next prompt.
+- Routing-level commands (`/agents`, `/switch`, `/bindings`, `/route`, `/discord`, `/gateway`, `/exit`, `/help`) handled in REPL, not Session.

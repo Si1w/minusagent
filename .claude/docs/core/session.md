@@ -6,8 +6,13 @@ description: Session orchestrator and JSONL persistence
 
 Orchestrator between Frontend and Agent. Owns SharedStore and Agent.
 
+## Lane Lock
+
+Session holds a per-session `LaneLock` (`Arc<tokio::sync::Mutex<()>>`). `turn()` acquires it (blocking) for the entire duration, so background tasks (heartbeat) yield via `try_lock()`.
+
 ## turn(input, channel)
 
+- Acquires lane lock (blocking — user always wins).
 - Routes `/commands` to `handle_command()`.
 - If Intelligence is configured, rebuilds `system_prompt` via `Intelligence::build_prompt()` before each turn.
 - Appends user message to history, runs `Agent::run()`.
@@ -19,19 +24,20 @@ Orchestrator between Frontend and Agent. Owns SharedStore and Agent.
 |----------|---------|-------------|
 | Sessions | `/new <label>` | Create new session |
 | | `/save` | Save session to JSONL |
-| | `/load <id>` | Load by ID or prefix |
+| | `/load <id>` | Load by label or prefix |
 | | `/list` | List all sessions |
 | | `/compact` | Compact history |
-| Intelligence | `/remember <name> <txt>` | Save memory (MemoryWrite Node) |
+| Intelligence | `/prompt` | Show current system prompt |
+| | `/remember <name> <txt>` | Save memory (MemoryWrite Node) |
 | | `/<skill> [args]` | Invoke discovered skill |
 
-Note: `/agents`, `/switch`, `/bind`, `/discord`, `/gateway`, `/exit` are handled in `main.rs` CLI task, not in Session.
+Note: `/agents`, `/switch`, `/bindings`, `/route`, `/discord`, `/gateway`, `/exit`, `/help` are handled in `repl.rs`, not in Session.
 
 ## Persistence (SessionStore)
 
 - `sessions/` directory, one `.jsonl` file per session.
 - `sessions/sessions.json` — index with metadata (label, created_at, last_active, message_count).
-- Prefix matching: `/load abc` matches any session ID starting with `abc`.
+- Prefix matching: `/load abc` matches any session label starting with `abc`.
 - `SessionStore::new(base_dir)` accepts custom directory (tests use tempdir).
 
 ## Compaction

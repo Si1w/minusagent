@@ -20,6 +20,7 @@ ratatui = "0.30.0"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 unicode-width = "0.2.2"
 regex = "1.12.3"
+cron = "0.15"
 
 [dev-dependencies]
 dotenvy = "0.15.7"

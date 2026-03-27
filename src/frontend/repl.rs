@@ -46,6 +46,13 @@ pub async fn run(gateway: Arc<Gateway>, cli: Arc<dyn Channel>) {
                  \x20 /bindings               List route bindings\n\
                  \x20 /route <ch> <peer>      Test route resolution\n\
                  \n\
+                 Scheduler\n\
+                 \x20 /heartbeat              Heartbeat status\n\
+                 \x20 /heartbeat stop         Stop heartbeat\n\
+                 \x20 /trigger                Manual heartbeat\n\
+                 \x20 /cron                   List cron jobs\n\
+                 \x20 /cron stop              Stop cron service\n\
+                 \n\
                  Gateways\n\
                  \x20 /discord                Discord bot\n\
                  \x20 /gateway                WebSocket API\n\
@@ -216,6 +223,65 @@ pub async fn run(gateway: Arc<Gateway>, cli: Arc<dyn Channel>) {
                 };
                 cli.send(&text).await;
             }
+            continue;
+        }
+
+        // /cron — list cron jobs
+        if msg.text.starts_with("/cron") {
+            let arg = msg
+                .text
+                .strip_prefix("/cron")
+                .unwrap_or("")
+                .trim()
+                .to_string();
+
+            if arg.starts_with("trigger ") {
+                let job_id = arg.strip_prefix("trigger ").unwrap().trim();
+                if let Some(h) = gateway.cron_handle().await {
+                    let result = h.trigger_job(job_id).await;
+                    cli.send(&result).await;
+                } else {
+                    cli.send("Cron service not running.").await;
+                }
+            } else if arg == "stop" {
+                if let Some(h) = gateway.cron_handle().await {
+                    h.stop();
+                    cli.send("Cron service stopped.").await;
+                } else {
+                    cli.send("Cron service not running.").await;
+                }
+            } else if arg == "reload" {
+                if let Some(h) = gateway.cron_handle().await {
+                    let result = h.reload().await;
+                    cli.send(&result).await;
+                } else {
+                    cli.send("Cron service not running.").await;
+                }
+            } else {
+                let jobs = gateway.cron_list_jobs().await;
+                if jobs.is_empty() {
+                    cli.send("No cron jobs.").await;
+                } else {
+                    let mut lines = vec![format!(
+                        "Cron Jobs ({}):",
+                        jobs.len()
+                    )];
+                    for j in &jobs {
+                        let en = if j.enabled { "on" } else { "OFF" };
+                        lines.push(format!(
+                            "  {} ({}) [{en}] kind={} \
+                             errors={} last={} next={}",
+                            j.name,
+                            j.id,
+                            j.kind,
+                            j.errors,
+                            j.last_run,
+                            j.next_run,
+                        ));
+                    }
+                    cli.send(&lines.join("\n")).await;
+                }
+        }
             continue;
         }
 

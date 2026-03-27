@@ -20,15 +20,13 @@ Five-tier binding table. Bindings are sorted by (tier ASC, priority DESC); first
 
 - `add(binding)` — Insert and re-sort.
 - `remove(agent_id, match_key, match_value)` — Remove by exact triple match.
-- `remove_by_key(match_key, match_value)` — Remove all bindings matching key-value (any agent).
 - `resolve_msg(channel, account_id, guild_id, peer_id)` — Walk tiers 1-5, return first match.
 - `load_file(path)` — Load bindings from a JSON array file.
-- `save_file(path)` — Persist all bindings to a JSON file.
 - `list()` — Return all bindings in match order.
 
 ## Binding Persistence
 
-`routes.json` at project root. Loaded at startup, saved on every `/route` change.
+`routes.json` at project root. Loaded at startup via `load_file()`.
 
 ```json
 [
@@ -45,14 +43,17 @@ Builds a session key from agent ID, channel metadata, and `dm_scope`:
 - `per-channel-peer` → `agent:{id}:{ch}:direct:{peer}`
 - `per-account-channel-peer` → `agent:{id}:{ch}:{acc}:direct:{peer}`
 
-## CLI commands
+If `peer_id` is empty, always falls back to `agent:{id}:main`.
 
-- `/route` — List all bindings.
-- `/route <channel> <agent>` — Add tier-4 channel binding (persisted).
-- `/route rm <channel>` — Remove channel binding (persisted).
+## BindingRouter
+
+Wraps `BindingTable` + `AgentManager`. Implements `Router` trait:
+- `resolve(msg)` — Look up binding, fallback to default agent (`mandeven`), build result.
+- `resolve_explicit(agent_id, msg)` — Override with explicit agent ID, normalize, build result.
+
+## CLI commands (handled in repl.rs)
+
+- `/bindings` — List all bindings.
+- `/route <ch> <peer> [acc] [guild]` — Test route resolution.
 - `/switch <agent>` — Override routing for current CLI session.
 - `/switch off` — Restore default routing.
-
-## Main loop routing
-
-`main.rs` uses `AppState.resolve_route()` to determine agent_id and session_key. CLI `/switch` override takes precedence over BindingTable when set.
