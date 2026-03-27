@@ -8,7 +8,7 @@ use crate::core::store::LLMConfig;
 use crate::intelligence::memory::MemoryStore;
 use crate::intelligence::prompt::format_memory_content;
 use crate::routing::delivery::DeliveryHandle;
-use crate::scheduler::{LANE_SESSION, LaneLock, run_single_turn};
+use crate::scheduler::{LANE_SESSION, LaneLock, now_secs, run_single_turn};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -379,13 +379,6 @@ pub fn spawn(
     });
 
     HeartbeatHandle { cmd_tx }
-}
-
-fn now_secs() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64()
 }
 
 #[cfg(test)]

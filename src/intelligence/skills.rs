@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::intelligence::utils::{extract_body, parse_frontmatter};
+use crate::intelligence::utils::{discover_subdirs, extract_body};
 
 const MAX_SKILLS: usize = 150;
 
@@ -61,52 +61,21 @@ impl SkillsManager {
 
         let mut seen: HashMap<String, Skill> = HashMap::new();
         for dir in &scan_order {
-            for skill in Self::scan_dir(dir) {
-                seen.insert(skill.name.clone(), skill);
+            for f in discover_subdirs(dir, "SKILL.md") {
+                let name = match f.meta.get("name") {
+                    Some(n) if !n.is_empty() => n.clone(),
+                    _ => continue,
+                };
+                seen.insert(name.clone(), Skill {
+                    name,
+                    description: f.meta.get("description").cloned().unwrap_or_default(),
+                    path: f.path,
+                });
             }
         }
 
         self.skills = seen.into_values().collect();
         self.skills.truncate(MAX_SKILLS);
-    }
-
-    fn scan_dir(base: &Path) -> Vec<Skill> {
-        let entries = match std::fs::read_dir(base) {
-            Ok(e) => e,
-            Err(_) => return Vec::new(),
-        };
-
-        let mut dirs: Vec<_> = entries
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_dir())
-            .collect();
-        dirs.sort_by_key(|e| e.file_name());
-
-        let mut found = Vec::new();
-        for entry in dirs {
-            let skill_md = entry.path().join("SKILL.md");
-            let content = match std::fs::read_to_string(&skill_md) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-
-            let meta = parse_frontmatter(&content);
-            let name = match meta.get("name") {
-                Some(n) if !n.is_empty() => n.clone(),
-                _ => continue,
-            };
-
-            found.push(Skill {
-                name,
-                description: meta
-                    .get("description")
-                    .cloned()
-                    .unwrap_or_default(),
-                path: skill_md,
-            });
-        }
-
-        found
     }
 }
 

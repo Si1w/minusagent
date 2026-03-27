@@ -34,6 +34,14 @@ pub fn push_bg_output(msg: String) {
     }
 }
 
+/// Current time as fractional seconds since UNIX epoch
+pub fn now_secs() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}
+
 /// Drain all buffered background messages
 pub fn drain_bg_output() -> Vec<String> {
     BG_OUTPUT

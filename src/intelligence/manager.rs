@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::intelligence::utils::extract_body;
+use crate::intelligence::utils::{discover_subdirs, extract_body};
 
 const DEFAULT_AGENT_ID: &str = "mandeven";
 
@@ -139,41 +139,25 @@ impl AgentManager {
     /// Directory name becomes both the agent ID and name.
     /// The entire file content is used as the system prompt (identity).
     pub fn discover_workspace(&mut self, base_dir: &Path) {
-        let entries = match std::fs::read_dir(base_dir) {
-            Ok(e) => e,
-            Err(_) => return,
-        };
-
-        for entry in entries.flatten() {
-            if !entry.path().is_dir() {
-                continue;
-            }
-            let agent_md = entry.path().join("AGENT.md");
-            let content = match std::fs::read_to_string(&agent_md) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-
-            let dir_name =
-                entry.file_name().to_string_lossy().to_string();
-            // If file has frontmatter, use body only; otherwise whole file
-            let identity = extract_body(&content);
+        for f in discover_subdirs(base_dir, "AGENT.md") {
+            let identity = extract_body(&f.content);
             let identity = if identity.is_empty() {
-                content.trim().to_string()
+                f.content.trim().to_string()
             } else {
                 identity
             };
+            let workspace_dir = f.path
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
 
             self.register(AgentConfig {
-                id: dir_name.clone(),
-                name: dir_name,
+                id: f.name.clone(),
+                name: f.name,
                 system_prompt: identity,
                 model: String::new(),
                 dm_scope: "per-peer".into(),
-                workspace_dir: entry
-                    .path()
-                    .to_string_lossy()
-                    .to_string(),
+                workspace_dir,
             });
         }
     }
