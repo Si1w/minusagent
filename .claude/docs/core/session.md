@@ -30,6 +30,8 @@ Session holds a per-session `LaneLock` (`Arc<tokio::sync::Mutex<()>>`). `turn()`
 | Intelligence | `/prompt` | Show current system prompt |
 | | `/remember <name> <txt>` | Save memory (MemoryWrite Node) |
 | | `/<skill> [args]` | Invoke discovered skill |
+| Scheduler | `/heartbeat` | Heartbeat status |
+| | `/trigger` | Manual heartbeat trigger |
 
 Note: `/agents`, `/switch`, `/bindings`, `/route`, `/discord`, `/gateway`, `/exit`, `/help` are handled in `repl.rs`, not in Session.
 

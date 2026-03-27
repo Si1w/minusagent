@@ -8,7 +8,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Duration;
 
 use crate::core::store::LLMConfig;
-use crate::scheduler::{push_bg_output, run_single_turn};
+use crate::routing::delivery::DeliveryHandle;
+use crate::scheduler::run_single_turn;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const AUTO_DISABLE_THRESHOLD: u32 = 5;
@@ -152,10 +153,15 @@ struct CronService {
     run_log: PathBuf,
     jobs: Vec<CronJob>,
     llm_config: LLMConfig,
+    delivery: DeliveryHandle,
 }
 
 impl CronService {
-    fn new(cron_file: PathBuf, llm_config: LLMConfig) -> Self {
+    fn new(
+        cron_file: PathBuf,
+        llm_config: LLMConfig,
+        delivery: DeliveryHandle,
+    ) -> Self {
         let run_log = cron_file
             .parent()
             .unwrap_or(Path::new("."))
@@ -166,6 +172,7 @@ impl CronService {
             run_log,
             jobs: Vec::new(),
             llm_config,
+            delivery,
         };
         svc.load_jobs();
         svc
@@ -294,7 +301,7 @@ impl CronService {
                     job_name, job.consecutive_errors, error
                 );
                 log::warn!("{msg}");
-                push_bg_output(msg);
+                self.delivery.enqueue("bg", "", &msg);
             }
         } else {
             job.consecutive_errors = 0;
@@ -321,7 +328,8 @@ impl CronService {
         }
 
         if !output.is_empty() && status != "skipped" {
-            push_bg_output(format!("[{job_name}] {output}"));
+            self.delivery
+                .enqueue("bg", "", &format!("[{job_name}] {output}"));
         }
     }
 
@@ -398,10 +406,15 @@ fn compute_next(job: &CronJob, now: f64) -> f64 {
 ///
 /// * `cron_file` - Path to CRON.json
 /// * `llm_config` - LLM provider configuration for agent_turn jobs
-pub fn spawn(cron_file: PathBuf, llm_config: LLMConfig) -> CronHandle {
+/// * `delivery` - Delivery handle for background output
+pub fn spawn(
+    cron_file: PathBuf,
+    llm_config: LLMConfig,
+    delivery: DeliveryHandle,
+) -> CronHandle {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<CronCmd>(8);
 
-    let mut svc = CronService::new(cron_file, llm_config);
+    let mut svc = CronService::new(cron_file, llm_config, delivery);
     log::info!("Cron service started with {} jobs", svc.jobs.len());
 
     tokio::spawn(async move {
@@ -542,6 +555,7 @@ mod tests {
                 api_key: String::new(),
                 context_window: 0,
             },
+            DeliveryHandle::noop(),
         );
         assert!(svc.jobs.is_empty());
     }

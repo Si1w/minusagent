@@ -15,6 +15,7 @@ use crate::core::store::{Config, Context, LLMConfig, SharedStore, SystemState};
 use crate::frontend::{Channel, UserMessage};
 use crate::intelligence::Intelligence;
 use crate::intelligence::manager::{AgentConfig, normalize_agent_id};
+use crate::routing::delivery::DeliveryHandle;
 use crate::routing::router::{Binding, BindingRouter, Router};
 use crate::scheduler::LaneLock;
 use crate::scheduler::cron::{CronHandle, CronJobStatus};
@@ -116,26 +117,50 @@ pub struct Gateway {
     session_txs: Mutex<HashMap<String, mpsc::Sender<SessionMessage>>>,
     heartbeat_handles: Mutex<HashMap<String, HeartbeatHandle>>,
     cron_handle: Mutex<Option<CronHandle>>,
+    delivery: DeliveryHandle,
 }
 
 impl Gateway {
     /// Create a new gateway
     pub fn new(state: SharedState, provider: ProviderConfig) -> Self {
+        // Start delivery runner
+        let delivery_dir = provider
+            .workspace_dir
+            .as_ref()
+            .map(|ws| ws.join(".delivery"))
+            .unwrap_or_else(|| PathBuf::from(".delivery"));
+        let delivery = crate::routing::delivery::spawn(
+            &delivery_dir,
+            |_channel, _to, text| {
+                crate::scheduler::push_bg_output(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("Failed to start delivery runner");
+
         // Start cron service if CRON.json exists
-        let cron_handle = provider.workspace_dir.as_ref().map(|ws| {
-            let cron_file = ws.join("CRON.json");
-            if cron_file.exists() {
-                let llm_config = LLMConfig {
-                    model: provider.default_model.clone(),
-                    base_url: provider.base_url.clone(),
-                    api_key: provider.api_key.clone(),
-                    context_window: provider.context_window,
-                };
-                Some(crate::scheduler::cron::spawn(cron_file, llm_config))
-            } else {
-                None
-            }
-        }).flatten();
+        let cron_handle = provider
+            .workspace_dir
+            .as_ref()
+            .map(|ws| {
+                let cron_file = ws.join("CRON.json");
+                if cron_file.exists() {
+                    let llm_config = LLMConfig {
+                        model: provider.default_model.clone(),
+                        base_url: provider.base_url.clone(),
+                        api_key: provider.api_key.clone(),
+                        context_window: provider.context_window,
+                    };
+                    Some(crate::scheduler::cron::spawn(
+                        cron_file,
+                        llm_config,
+                        delivery.clone(),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .flatten();
 
         Self {
             state,
@@ -143,12 +168,18 @@ impl Gateway {
             session_txs: Mutex::new(HashMap::new()),
             heartbeat_handles: Mutex::new(HashMap::new()),
             cron_handle: Mutex::new(cron_handle),
+            delivery,
         }
     }
 
     /// Read access to the shared state
     pub fn state(&self) -> &SharedState {
         &self.state
+    }
+
+    /// Get the delivery handle
+    pub fn delivery(&self) -> &DeliveryHandle {
+        &self.delivery
     }
 
     /// Get the cron handle
@@ -280,6 +311,7 @@ impl Gateway {
                             system_prompt,
                             tokio::time::Duration::from_secs(1800),
                             (9, 22),
+                            self.delivery.clone(),
                         )
                     });
 
@@ -469,6 +501,7 @@ async fn handle_rpc(
         "agents.list" => m_agents_list(gateway),
         "agents.register" => m_agents_register(gateway, &params),
         "sessions.list" => m_sessions_list(gateway),
+        "delivery.stats" => m_delivery_stats(gateway).await,
         "status" => m_status(gateway),
         _ => Err(format!("Unknown method: {method}")),
     };
@@ -656,6 +689,20 @@ fn m_sessions_list(
     let s = gateway.state().read().map_err(|e| e.to_string())?;
     let sessions: Vec<&String> = s.sessions.iter().collect();
     Ok(json!(sessions))
+}
+
+async fn m_delivery_stats(
+    gateway: &Arc<Gateway>,
+) -> std::result::Result<Value, String> {
+    match gateway.delivery().stats().await {
+        Some(st) => Ok(json!({
+            "total_attempted": st.total_attempted,
+            "total_succeeded": st.total_succeeded,
+            "total_failed": st.total_failed,
+            "pending": st.pending,
+        })),
+        None => Err("delivery runner not available".to_string()),
+    }
 }
 
 fn m_status(

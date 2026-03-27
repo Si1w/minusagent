@@ -7,7 +7,8 @@ use tokio::time::Duration;
 use crate::core::store::LLMConfig;
 use crate::intelligence::memory::MemoryStore;
 use crate::intelligence::prompt::format_memory_content;
-use crate::scheduler::{LaneLock, push_bg_output, run_single_turn};
+use crate::routing::delivery::DeliveryHandle;
+use crate::scheduler::{LaneLock, run_single_turn};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -71,6 +72,7 @@ struct HeartbeatRunner {
     llm_config: LLMConfig,
     identity: String,
     memory: MemoryStore,
+    delivery: DeliveryHandle,
     interval: Duration,
     active_hours: (u8, u8),
     last_run_at: f64,
@@ -184,7 +186,8 @@ impl HeartbeatRunner {
 
         if let Err(e) = result {
             log::error!("Heartbeat error: {e}");
-            push_bg_output(format!("[heartbeat error] {e}"));
+            self.delivery
+                .enqueue("bg", "", &format!("[heartbeat error] {e}"));
         }
     }
 
@@ -207,17 +210,16 @@ impl HeartbeatRunner {
         }
         self.last_output = meaningful.trim().to_string();
         self.output_count += 1;
-        push_bg_output(format!("[heartbeat] {meaningful}"));
+        self.delivery
+            .enqueue("bg", "", &format!("[heartbeat] {meaningful}"));
         Ok(())
     }
 
-    /// Manual trigger (bypasses interval check)
+    /// Manual trigger (bypasses interval check and lane lock)
+    ///
+    /// Lane lock is only for automatic execution yielding to user turns.
+    /// Manual trigger is an explicit user action — no lock needed.
     async fn trigger(&mut self) -> String {
-        let lock = self.lane_lock.clone();
-        let guard = match lock.try_lock() {
-            Ok(g) => g,
-            Err(_) => return "main lane occupied, cannot trigger".into(),
-        };
         self.running = true;
 
         let result = match self.build_prompt() {
@@ -240,7 +242,11 @@ impl HeartbeatRunner {
                             self.last_output = m.trim().to_string();
                             self.output_count += 1;
                             let len = m.len();
-                            push_bg_output(format!("[heartbeat] {m}"));
+                            self.delivery.enqueue(
+                                "bg",
+                                "",
+                                &format!("[heartbeat] {m}"),
+                            );
                             format!("triggered, output queued ({len} chars)")
                         }
                     },
@@ -250,7 +256,6 @@ impl HeartbeatRunner {
             None => "HEARTBEAT.md is empty or unreadable".to_string(),
         };
 
-        drop(guard);
         self.running = false;
         self.last_run_at = now_secs();
         result
@@ -301,6 +306,7 @@ impl HeartbeatRunner {
 /// * `identity` - Agent identity text for system prompt
 /// * `interval` - Minimum interval between heartbeat runs
 /// * `active_hours` - Active hours range (start, end), e.g. (9, 22)
+/// * `delivery` - Delivery handle for background output
 pub fn spawn(
     workspace_dir: PathBuf,
     lane_lock: LaneLock,
@@ -308,6 +314,7 @@ pub fn spawn(
     identity: String,
     interval: Duration,
     active_hours: (u8, u8),
+    delivery: DeliveryHandle,
 ) -> HeartbeatHandle {
     let heartbeat_path = workspace_dir.join("HEARTBEAT.md");
     let mut memory = MemoryStore::new(&workspace_dir.join("memory"));
@@ -323,6 +330,7 @@ pub fn spawn(
         llm_config,
         identity,
         memory,
+        delivery,
         interval,
         active_hours,
         last_run_at: 0.0,
@@ -383,6 +391,7 @@ mod tests {
             },
             identity: String::new(),
             memory: MemoryStore::new(&PathBuf::from("/tmp/nonexistent")),
+            delivery: DeliveryHandle::noop(),
             interval: Duration::from_secs(1800),
             active_hours: (9, 22),
             last_run_at: 0.0,

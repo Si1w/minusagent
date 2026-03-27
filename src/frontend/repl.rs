@@ -52,6 +52,8 @@ pub async fn run(gateway: Arc<Gateway>, cli: Arc<dyn Channel>) {
                  \x20 /trigger                Manual heartbeat\n\
                  \x20 /cron                   List cron jobs\n\
                  \x20 /cron stop              Stop cron service\n\
+                 \x20 /delivery               Delivery queue stats\n\
+                 \x20 /delivery stop          Stop delivery runner\n\
                  \n\
                  Gateways\n\
                  \x20 /discord                Discord bot\n\
@@ -282,6 +284,35 @@ pub async fn run(gateway: Arc<Gateway>, cli: Arc<dyn Channel>) {
                     cli.send(&lines.join("\n")).await;
                 }
         }
+            continue;
+        }
+
+        // /delivery — delivery queue stats / stop
+        if msg.text.starts_with("/delivery") {
+            let arg = msg
+                .text
+                .strip_prefix("/delivery")
+                .unwrap_or("")
+                .trim();
+            if arg == "stop" {
+                gateway.delivery().stop();
+                cli.send("Delivery runner stopped.").await;
+            } else if let Some(st) =
+                gateway.delivery().stats().await
+            {
+                cli.send(&format!(
+                    "Delivery Queue:\n\
+                     \x20 attempted={}  succeeded={}  \
+                     failed={}  pending={}",
+                    st.total_attempted,
+                    st.total_succeeded,
+                    st.total_failed,
+                    st.pending,
+                ))
+                .await;
+            } else {
+                cli.send("Delivery runner not available.").await;
+            }
             continue;
         }
 
