@@ -58,7 +58,9 @@ pub fn classify_failure(err: &anyhow::Error) -> FailoverReason {
     if msg.contains("402") || msg.contains("billing") || msg.contains("quota") {
         return FailoverReason::Billing;
     }
-    if msg.contains("context") || msg.contains("token") || msg.contains("overflow") {
+    if msg.contains("context") || msg.contains("context_length") || msg.contains("overflow")
+        || msg.contains("too many tokens") || msg.contains("maximum context")
+    {
         return FailoverReason::Overflow;
     }
 

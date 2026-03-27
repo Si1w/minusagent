@@ -125,7 +125,9 @@ impl Node for MemoryWrite {
 
         // Write .md file with frontmatter
         std::fs::create_dir_all(&prep.memory_dir)?;
-        let path = prep.memory_dir.join(format!("{}.md", prep.name));
+        // Sanitize name to prevent path traversal
+        let safe_name = prep.name.replace(['/', '\\', '.'], "_");
+        let path = prep.memory_dir.join(format!("{safe_name}.md"));
         // Sanitize TLDR to single line
         let tldr = tldr
             .lines()
@@ -134,14 +136,15 @@ impl Node for MemoryWrite {
             .trim()
             .to_string();
 
+        let escaped_tldr = tldr.replace(':', "：");
         let file_content = format!(
-            "---\nid: {}\ntldr: {tldr}\n---\n\n{}",
-            prep.name, prep.content,
+            "---\nid: {safe_name}\ntldr: {escaped_tldr}\n---\n\n{}",
+            prep.content,
         );
         tokio::fs::write(&path, &file_content).await?;
 
         Ok(MemoryWriteResult {
-            name: prep.name,
+            name: safe_name,
             tldr,
             path,
         })

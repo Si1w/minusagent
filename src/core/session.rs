@@ -355,8 +355,7 @@ impl Session {
         let summary_text = match response {
             Ok(resp) => resp.content.unwrap_or_default(),
             Err(_) => {
-                self.store.context.history =
-                    original_history[compress_count..].to_vec();
+                self.store.context.history = original_history;
                 return Ok(());
             }
         };
@@ -470,7 +469,7 @@ impl Session {
                         output.push_str(&format!(
                             "  {id}{label}  msgs={}  last={}{current}\n",
                             meta.message_count,
-                            &meta.last_active[..19],
+                            meta.last_active.get(..19).unwrap_or(&meta.last_active),
                         ));
                     }
                     channel.send(&output).await;

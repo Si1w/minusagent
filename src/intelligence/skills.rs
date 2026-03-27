@@ -60,7 +60,8 @@ impl SkillsManager {
         scan_order.push(cwd.join("skills"));
 
         let mut seen: HashMap<String, Skill> = HashMap::new();
-        for dir in &scan_order {
+        // Scan in reverse so earlier (higher-priority) dirs overwrite later ones
+        for dir in scan_order.iter().rev() {
             for f in discover_subdirs(dir, "SKILL.md") {
                 let name = match f.meta.get("name") {
                     Some(n) if !n.is_empty() => n.clone(),
