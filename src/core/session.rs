@@ -12,6 +12,8 @@ use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore};
 use crate::frontend::{Channel, SilentChannel};
 use crate::intelligence::memory::MemoryWrite;
+use crate::scheduler::LaneLock;
+use crate::scheduler::heartbeat::HeartbeatHandle;
 
 const SESSIONS_DIR: &str = "sessions";
 const COMPACT_THRESHOLD: f64 = 0.8;
@@ -189,23 +191,41 @@ pub struct Session {
     session_store: SessionStore,
     agent: Agent,
     http: reqwest::Client,
+    lane_lock: LaneLock,
+    heartbeat: Option<HeartbeatHandle>,
 }
 
 impl Session {
     /// Create a new session orchestrator
-    pub fn new(store: SharedStore) -> Result<Self> {
+    ///
+    /// # Arguments
+    ///
+    /// * `store` - Shared state container
+    /// * `lane_lock` - Per-session lane lock for user/background priority
+    /// * `heartbeat` - Heartbeat handle if HEARTBEAT.md exists
+    pub fn new(
+        store: SharedStore,
+        lane_lock: LaneLock,
+        heartbeat: Option<HeartbeatHandle>,
+    ) -> Result<Self> {
         let session_store = SessionStore::new(Path::new(SESSIONS_DIR))?;
         let agent = Agent;
         let http = reqwest::Client::new();
-        Ok(Self { store, session_store, agent, http })
+        Ok(Self { store, session_store, agent, http, lane_lock, heartbeat })
     }
 
     /// Handle one user input: dispatch `/` commands or run agent turn
+    ///
+    /// Acquires the lane lock for the duration of the turn, ensuring
+    /// background tasks (heartbeat) yield when a user is active.
     pub async fn turn(
         &mut self,
         input: &str,
         channel: &Arc<dyn Channel>,
     ) -> Result<()> {
+        let lock = self.lane_lock.clone();
+        let _guard = lock.lock().await;
+
         if input.starts_with('/') {
             return self.handle_command(input, channel).await;
         }
@@ -455,6 +475,53 @@ impl Session {
                     });
                 channel.send(&prompt).await;
             }
+            "/heartbeat" => match &self.heartbeat {
+                Some(handle) => {
+                    if arg == "stop" {
+                        handle.stop();
+                        channel.send("Heartbeat stopped.").await;
+                    } else if let Some(st) = handle.status().await {
+                        channel
+                            .send(&format!(
+                                "Heartbeat:\n\
+                                 \x20 enabled={}  running={}  \
+                                 should_run={}\n\
+                                 \x20 reason: {}\n\
+                                 \x20 last_run={}  next_in={}  \
+                                 interval={}s\n\
+                                 \x20 active_hours={}:00-{}:00  \
+                                 outputs={}",
+                                st.enabled,
+                                st.running,
+                                st.should_run,
+                                st.reason,
+                                st.last_run,
+                                st.next_in,
+                                st.interval_secs,
+                                st.active_hours.0,
+                                st.active_hours.1,
+                                st.queue_size,
+                            ))
+                            .await;
+                    }
+                }
+                None => {
+                    channel
+                        .send("No heartbeat (HEARTBEAT.md not found)")
+                        .await;
+                }
+            },
+            "/trigger" => match &self.heartbeat {
+                Some(handle) => {
+                    let result = handle.trigger().await;
+                    channel.send(&result).await;
+                }
+                None => {
+                    channel
+                        .send("No heartbeat (HEARTBEAT.md not found)")
+                        .await;
+                }
+            },
             "/remember" => {
                 let rem_parts: Vec<&str> =
                     arg.splitn(2, ' ').collect();

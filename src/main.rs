@@ -7,6 +7,7 @@ mod frontend;
 mod intelligence;
 mod logger;
 mod routing;
+mod scheduler;
 
 use crate::frontend::cli::Cli;
 use crate::frontend::gateway::{AppState, Gateway, ProviderConfig};
@@ -18,6 +19,7 @@ use crate::routing::router::{BindingRouter, BindingTable};
 async fn main() {
     dotenvy::dotenv().ok();
     logger::TuiLogger::init();
+    scheduler::init_bg_output();
 
     let provider = ProviderConfig::from_env();
 

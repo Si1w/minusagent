@@ -18,7 +18,7 @@ SharedStore
 # Context
 
 Everything the LLM can see:
-- `system_prompt` — loaded from `prompts/system.md` (fallback), or dynamically assembled by Intelligence (8-layer prompt)
+- `system_prompt` — dynamically assembled by Intelligence (7-layer prompt), or fallback default
 - `history` — Vec<Message> (role: User/Assistant/Tool, content, tool_calls, tool_call_id)
 
 # SystemState

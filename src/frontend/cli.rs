@@ -81,6 +81,12 @@ async fn run_event_loop(
                 s.auto_scroll = true;
             }
 
+            for msg in crate::scheduler::drain_bg_output() {
+                s.output.push_str(&msg);
+                s.output.push('\n');
+                s.auto_scroll = true;
+            }
+
             let _ = terminal.draw(|f| render(&mut s, f));
         }
 

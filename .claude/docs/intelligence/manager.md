@@ -12,8 +12,7 @@ Per-agent configuration:
 
 - **id** — Normalized identifier (`[a-z0-9][a-z0-9_-]{0,63}`)
 - **name** — Display name
-- **personality** — Personality description for prompt generation
-- **system_prompt** — Explicit system prompt (from `AGENT.md` body); if empty, generated from name + personality
+- **system_prompt** — Identity text (from `AGENT.md` body)
 - **model** — Model override; empty means use global default
 - **dm_scope** — Session isolation scope: `main`, `per-peer`, `per-channel-peer`, `per-account-channel-peer`
 - **workspace_dir** — Per-agent workspace directory; overrides global `WORKSPACE_DIR`
@@ -28,22 +27,13 @@ Per-agent configuration:
 
 ## Agent Discovery
 
-Each `workspace/<name>/AGENT.md` file registers an agent:
+Each subdirectory under `.agents/` containing `AGENT.md` is auto-registered:
 
-```markdown
----
-name: Mandeven
-dm_scope: per-peer
-model: gpt-4
----
-
-You are Mandeven, a general-purpose AI assistant.
-```
-
-- Directory name becomes the agent ID
-- Frontmatter: `name`, `personality`, `model`, `dm_scope`
-- Body: used as `system_prompt` (identity for Layer 1)
+- Directory name becomes agent ID (normalized)
+- If `AGENT.md` has frontmatter, body (after `---`) is used as `system_prompt`
+- If no frontmatter, entire file content is used as `system_prompt`
+- `dm_scope` defaults to `per-peer` for discovered agents
 
 ## normalize_agent_id
 
-Cleans raw strings into valid agent IDs: lowercase, replace invalid chars with hyphens, truncate to 64 chars. Falls back to `"main"` if empty.
+Cleans raw strings into valid agent IDs: lowercase, replace invalid chars with hyphens, truncate to 64 chars. Falls back to `"mandeven"` if empty.
