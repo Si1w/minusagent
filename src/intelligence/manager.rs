@@ -58,16 +58,6 @@ pub struct AgentConfig {
     pub workspace_dir: String,
 }
 
-impl AgentConfig {
-    /// Resolve the effective system prompt
-    ///
-    /// # Returns
-    ///
-    /// The system prompt from AGENT.md body.
-    pub fn effective_system_prompt(&self) -> String {
-        self.system_prompt.clone()
-    }
-}
 
 /// Registry of agent configurations
 pub struct AgentManager {
@@ -202,7 +192,7 @@ mod tests {
             workspace_dir: String::new(),
         };
         assert_eq!(
-            config.effective_system_prompt(),
+            config.system_prompt,
             "You are Luna, warm and curious."
         );
     }

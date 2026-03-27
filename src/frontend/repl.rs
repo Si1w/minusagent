@@ -71,7 +71,7 @@ pub async fn run(gateway: Arc<Gateway>, cli: Arc<dyn Channel>) {
                 let s = gateway
                     .state()
                     .read()
-                    .expect("State lock poisoned");
+                    .await;
                 let agents = s.router.manager().list();
                 if agents.is_empty() {
                     "No agents registered.".to_string()
@@ -125,7 +125,7 @@ pub async fn run(gateway: Arc<Gateway>, cli: Arc<dyn Channel>) {
                 let found = gateway
                     .state()
                     .read()
-                    .expect("State lock poisoned")
+                    .await
                     .router
                     .manager()
                     .get(&arg)
@@ -151,7 +151,7 @@ pub async fn run(gateway: Arc<Gateway>, cli: Arc<dyn Channel>) {
                 let s = gateway
                     .state()
                     .read()
-                    .expect("State lock poisoned");
+                    .await;
                 let bindings = s.router.table().list();
                 if bindings.is_empty() {
                     "No bindings.".to_string()
@@ -209,7 +209,7 @@ pub async fn run(gateway: Arc<Gateway>, cli: Arc<dyn Channel>) {
                     let s = gateway
                         .state()
                         .read()
-                        .expect("State lock poisoned");
+                        .await;
                     let result = s.router.resolve(&test_msg);
                     let agent =
                         s.router.manager().get(&result.agent_id);

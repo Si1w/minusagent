@@ -134,11 +134,7 @@ impl HeartbeatRunner {
         if response.contains("HEARTBEAT_OK") {
             let stripped =
                 response.replace("HEARTBEAT_OK", "").trim().to_string();
-            if stripped.len() > 5 {
-                Some(stripped)
-            } else {
-                None
-            }
+            if stripped.is_empty() { None } else { Some(stripped) }
         } else {
             let trimmed = response.trim().to_string();
             if trimmed.is_empty() { None } else { Some(trimmed) }
@@ -146,13 +142,16 @@ impl HeartbeatRunner {
     }
 
     /// Build system prompt and instruction for heartbeat turn
-    fn build_prompt(&self) -> Option<(String, String)> {
+    fn build_prompt(&mut self) -> Option<(String, String)> {
         let instructions =
             std::fs::read_to_string(&self.heartbeat_path).ok()?;
         let instructions = instructions.trim().to_string();
         if instructions.is_empty() {
             return None;
         }
+
+        // Refresh memory to pick up entries added via /remember
+        self.memory.discover();
 
         let mut prompt = self.identity.clone();
 
@@ -413,7 +412,11 @@ mod tests {
     fn test_parse_response_ok() {
         let runner = test_runner();
         assert!(runner.parse_response("HEARTBEAT_OK").is_none());
-        assert!(runner.parse_response("HEARTBEAT_OK ok").is_none());
+        assert!(runner.parse_response("HEARTBEAT_OK  ").is_none());
+        assert_eq!(
+            runner.parse_response("HEARTBEAT_OK ok"),
+            Some("ok".to_string())
+        );
         assert!(runner
             .parse_response("HEARTBEAT_OK something meaningful here")
             .is_some());

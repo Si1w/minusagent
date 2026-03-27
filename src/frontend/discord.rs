@@ -76,22 +76,7 @@ impl DiscordReply {
     }
 
     async fn send_message(&self, text: &str) -> Result<()> {
-        for chunk in chunk_text(text, MAX_MSG_LEN) {
-            self.http
-                .post(format!(
-                    "{API_BASE}/channels/{}/messages",
-                    self.channel_id
-                ))
-                .header(
-                    "Authorization",
-                    format!("Bot {}", self.token),
-                )
-                .json(&json!({ "content": chunk }))
-                .send()
-                .await?
-                .error_for_status()?;
-        }
-        Ok(())
+        post_discord_message(&self.http, &self.token, &self.channel_id, text).await
     }
 }
 
@@ -171,24 +156,28 @@ impl DeliverySink for DiscordSink {
         if to.is_empty() {
             return Err("Discord sink: empty channel_id".into());
         }
-        for chunk in chunk_text(text, MAX_MSG_LEN) {
-            self.http
-                .post(format!(
-                    "{API_BASE}/channels/{to}/messages"
-                ))
-                .header(
-                    "Authorization",
-                    format!("Bot {}", self.token),
-                )
-                .json(&json!({ "content": chunk }))
-                .send()
-                .await
-                .map_err(|e| e.to_string())?
-                .error_for_status()
-                .map_err(|e| e.to_string())?;
-        }
-        Ok(())
+        post_discord_message(&self.http, &self.token, to, text)
+            .await
+            .map_err(|e| e.to_string())
     }
+}
+
+/// Send chunked messages to a Discord channel via REST API
+async fn post_discord_message(
+    http: &reqwest::Client,
+    token: &str,
+    channel_id: &str,
+    text: &str,
+) -> Result<()> {
+    for chunk in chunk_text(text, MAX_MSG_LEN) {
+        http.post(format!("{API_BASE}/channels/{channel_id}/messages"))
+            .header("Authorization", format!("Bot {token}"))
+            .json(&json!({ "content": chunk }))
+            .send()
+            .await?
+            .error_for_status()?;
+    }
+    Ok(())
 }
 
 // --- Gateway protocol helpers ---
@@ -275,7 +264,7 @@ pub async fn start_gateway(
 
     // Register Discord sink for outbound delivery
     {
-        let s = gateway.state().read().expect("State lock poisoned");
+        let s = gateway.state().read().await;
         s.router.outbound().register(
             "discord",
             Arc::new(DiscordSink::new(token.clone(), http.clone())),

@@ -13,6 +13,7 @@ use crate::frontend::{Channel, UserMessage};
 
 const BANNER: &str = "\
 Welcome. Type a message to chat, or use / commands.\n\n";
+const MAX_OUTPUT_BYTES: usize = 100_000;
 
 struct TuiState {
     output: String,
@@ -21,6 +22,18 @@ struct TuiState {
     scroll: u16,
     auto_scroll: bool,
     input_sender: Option<oneshot::Sender<String>>,
+}
+
+impl TuiState {
+    /// Trim output buffer from the front if it exceeds the max size
+    fn trim_output(&mut self) {
+        if self.output.len() > MAX_OUTPUT_BYTES {
+            let cut = self.output.len() - MAX_OUTPUT_BYTES;
+            // Find a char boundary after the cut point
+            let safe = self.output.ceil_char_boundary(cut);
+            self.output.drain(..safe);
+        }
+    }
 }
 
 /// Interactive CLI frontend using ratatui TUI
@@ -289,6 +302,7 @@ impl Channel for Cli {
             state.output.push('\n');
         }
         state.output.push('\n');
+        state.trim_output();
         state.auto_scroll = true;
     }
 
@@ -312,6 +326,7 @@ impl Channel for Cli {
     async fn on_stream_chunk(&self, chunk: &str) {
         let mut state = self.state.lock().await;
         state.output.push_str(chunk);
+        state.trim_output();
         state.auto_scroll = true;
     }
 

@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::core::session::Session;
@@ -19,7 +19,6 @@ use crate::routing::delivery::DeliveryHandle;
 use crate::routing::router::{Binding, BindingRouter, Router};
 use crate::scheduler::LaneLock;
 use crate::scheduler::cron::{CronHandle, CronJobStatus};
-use crate::scheduler::heartbeat::HeartbeatHandle;
 use crate::scheduler::lane::CommandQueue;
 
 /// Global LLM provider config (shared across all agents)
@@ -116,17 +115,16 @@ pub struct Gateway {
     state: SharedState,
     provider: ProviderConfig,
     session_txs: Mutex<HashMap<String, mpsc::Sender<SessionMessage>>>,
-    heartbeat_handles: Mutex<HashMap<String, HeartbeatHandle>>,
     cron_handle: Mutex<Option<CronHandle>>,
     delivery: DeliveryHandle,
 }
 
 impl Gateway {
     /// Create a new gateway
-    pub fn new(state: SharedState, provider: ProviderConfig) -> Self {
+    pub async fn new(state: SharedState, provider: ProviderConfig) -> Self {
         // Outbound sinks are shared between router and delivery runner
         let outbound = {
-            let s = state.read().expect("State lock poisoned");
+            let s = state.read().await;
             s.router.outbound().clone()
         };
 
@@ -170,7 +168,6 @@ impl Gateway {
             state,
             provider,
             session_txs: Mutex::new(HashMap::new()),
-            heartbeat_handles: Mutex::new(HashMap::new()),
             cron_handle: Mutex::new(cron_handle),
             delivery,
         }
@@ -223,7 +220,7 @@ impl Gateway {
         // 1. Resolve routing
         let (session_key, system_prompt, model, agent_id, channel_name, ws_dir) =
         {
-            let s = self.state.read().expect("State lock poisoned");
+            let s = self.state.read().await;
             let result = if let Some(ov) = agent_override {
                 s.router.resolve_explicit(ov, &msg)
             } else {
@@ -231,7 +228,7 @@ impl Gateway {
             };
             let agent = s.router.manager().get(&result.agent_id);
             let prompt = agent
-                .map(|a| a.effective_system_prompt())
+                .map(|a| a.system_prompt.clone())
                 .unwrap_or_default();
             let model =
                 s.router.manager().effective_model(&result.agent_id);
@@ -247,7 +244,7 @@ impl Gateway {
         // 2. Track session
         {
             let mut s =
-                self.state.write().expect("State lock poisoned");
+                self.state.write().await;
             s.sessions.insert(session_key.clone());
         }
 
@@ -320,14 +317,6 @@ impl Gateway {
                             String::new(),
                         )
                     });
-
-                // Store handle in gateway for REPL access
-                if let Some(ref h) = hb_handle {
-                    self.heartbeat_handles
-                        .lock()
-                        .await
-                        .insert(session_key.clone(), h.clone());
-                }
 
                 let lock = lane_lock.clone();
                 let (stx, mut srx) =
@@ -511,14 +500,14 @@ async fn handle_rpc(
 
     let result = match method {
         "send" => m_send(gateway, &params).await,
-        "bindings.set" => m_bindings_set(gateway, &params),
-        "bindings.remove" => m_bindings_remove(gateway, &params),
-        "bindings.list" => m_bindings_list(gateway),
-        "agents.list" => m_agents_list(gateway),
-        "agents.register" => m_agents_register(gateway, &params),
-        "sessions.list" => m_sessions_list(gateway),
+        "bindings.set" => m_bindings_set(gateway, &params).await,
+        "bindings.remove" => m_bindings_remove(gateway, &params).await,
+        "bindings.list" => m_bindings_list(gateway).await,
+        "agents.list" => m_agents_list(gateway).await,
+        "agents.register" => m_agents_register(gateway, &params).await,
+        "sessions.list" => m_sessions_list(gateway).await,
         "delivery.stats" => m_delivery_stats(gateway).await,
-        "status" => m_status(gateway),
+        "status" => m_status(gateway).await,
         _ => Err(format!("Unknown method: {method}")),
     };
 
@@ -583,12 +572,12 @@ async fn m_send(
     }))
 }
 
-fn m_bindings_set(
+async fn m_bindings_set(
     gateway: &Arc<Gateway>,
     params: &Value,
 ) -> std::result::Result<Value, String> {
     let mut s =
-        gateway.state().write().map_err(|e| e.to_string())?;
+        gateway.state().write().await;
     let binding = Binding {
         agent_id: normalize_agent_id(
             params["agent_id"].as_str().unwrap_or("mandeven"),
@@ -608,12 +597,12 @@ fn m_bindings_set(
     Ok(json!({"ok": true}))
 }
 
-fn m_bindings_remove(
+async fn m_bindings_remove(
     gateway: &Arc<Gateway>,
     params: &Value,
 ) -> std::result::Result<Value, String> {
     let mut s =
-        gateway.state().write().map_err(|e| e.to_string())?;
+        gateway.state().write().await;
     let removed = s.router.table_mut().remove(
         params["agent_id"].as_str().unwrap_or(""),
         params["match_key"].as_str().unwrap_or(""),
@@ -622,10 +611,10 @@ fn m_bindings_remove(
     Ok(json!({"removed": removed}))
 }
 
-fn m_bindings_list(
+async fn m_bindings_list(
     gateway: &Arc<Gateway>,
 ) -> std::result::Result<Value, String> {
-    let s = gateway.state().read().map_err(|e| e.to_string())?;
+    let s = gateway.state().read().await;
     let bindings: Vec<Value> = s
         .router
         .table()
@@ -644,10 +633,10 @@ fn m_bindings_list(
     Ok(json!(bindings))
 }
 
-fn m_agents_list(
+async fn m_agents_list(
     gateway: &Arc<Gateway>,
 ) -> std::result::Result<Value, String> {
-    let s = gateway.state().read().map_err(|e| e.to_string())?;
+    let s = gateway.state().read().await;
     let agents: Vec<Value> = s
         .router
         .manager()
@@ -665,12 +654,12 @@ fn m_agents_list(
     Ok(json!(agents))
 }
 
-fn m_agents_register(
+async fn m_agents_register(
     gateway: &Arc<Gateway>,
     params: &Value,
 ) -> std::result::Result<Value, String> {
     let mut s =
-        gateway.state().write().map_err(|e| e.to_string())?;
+        gateway.state().write().await;
     let config = AgentConfig {
         id: params["id"]
             .as_str()
@@ -699,10 +688,10 @@ fn m_agents_register(
     Ok(json!({"ok": true, "id": id}))
 }
 
-fn m_sessions_list(
+async fn m_sessions_list(
     gateway: &Arc<Gateway>,
 ) -> std::result::Result<Value, String> {
-    let s = gateway.state().read().map_err(|e| e.to_string())?;
+    let s = gateway.state().read().await;
     let sessions: Vec<&String> = s.sessions.iter().collect();
     Ok(json!(sessions))
 }
@@ -721,10 +710,10 @@ async fn m_delivery_stats(
     }
 }
 
-fn m_status(
+async fn m_status(
     gateway: &Arc<Gateway>,
 ) -> std::result::Result<Value, String> {
-    let s = gateway.state().read().map_err(|e| e.to_string())?;
+    let s = gateway.state().read().await;
     Ok(json!({
         "agents": s.router.manager().list().len(),
         "bindings": s.router.table().list().len(),
