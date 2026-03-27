@@ -23,6 +23,12 @@ pub struct CronJob {
     pub enabled: bool,
     pub schedule: ScheduleConfig,
     pub payload: Payload,
+    /// Delivery channel (e.g. "discord", "bg"). Defaults to "bg".
+    #[serde(default = "default_channel")]
+    pub channel: String,
+    /// Delivery target (e.g. Discord channel ID). Defaults to empty.
+    #[serde(default)]
+    pub to: String,
     #[serde(default)]
     pub delete_after_run: bool,
     #[serde(skip)]
@@ -31,6 +37,10 @@ pub struct CronJob {
     pub last_run_at: f64,
     #[serde(skip)]
     pub next_run_at: f64,
+}
+
+fn default_channel() -> String {
+    "bg".to_string()
 }
 
 fn default_true() -> bool {
@@ -244,6 +254,8 @@ impl CronService {
         let payload_text = job.payload.text.clone();
         let job_name = job.name.clone();
         let job_id = job.id.clone();
+        let delivery_channel = job.channel.clone();
+        let delivery_to = job.to.clone();
 
         let (output, status, error) = match payload_kind.as_str() {
             "agent_turn" => {
@@ -328,8 +340,11 @@ impl CronService {
         }
 
         if !output.is_empty() && status != "skipped" {
-            self.delivery
-                .enqueue("bg", "", &format!("[{job_name}] {output}"));
+            self.delivery.enqueue(
+                &delivery_channel,
+                &delivery_to,
+                &format!("[{job_name}] {output}"),
+            );
         }
     }
 
@@ -500,6 +515,8 @@ mod tests {
                 message: "hello".into(),
                 text: String::new(),
             },
+            channel: "bg".into(),
+            to: String::new(),
             delete_after_run: false,
             consecutive_errors: 0,
             last_run_at: 0.0,

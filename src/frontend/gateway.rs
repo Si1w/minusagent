@@ -123,6 +123,12 @@ pub struct Gateway {
 impl Gateway {
     /// Create a new gateway
     pub fn new(state: SharedState, provider: ProviderConfig) -> Self {
+        // Outbound sinks are shared between router and delivery runner
+        let outbound = {
+            let s = state.read().expect("State lock poisoned");
+            s.router.outbound().clone()
+        };
+
         // Start delivery runner
         let delivery_dir = provider
             .workspace_dir
@@ -131,10 +137,7 @@ impl Gateway {
             .unwrap_or_else(|| PathBuf::from(".delivery"));
         let delivery = crate::routing::delivery::spawn(
             &delivery_dir,
-            |_channel, _to, text| {
-                crate::scheduler::push_bg_output(text.to_string());
-                Ok(())
-            },
+            outbound,
         )
         .expect("Failed to start delivery runner");
 
@@ -312,6 +315,8 @@ impl Gateway {
                             tokio::time::Duration::from_secs(1800),
                             (9, 22),
                             self.delivery.clone(),
+                            "bg".to_string(),
+                            String::new(),
                         )
                     });
 

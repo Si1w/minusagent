@@ -1,5 +1,8 @@
-use crate::intelligence::manager::{AgentManager, normalize_agent_id};
+use std::sync::Arc;
+
 use crate::frontend::UserMessage;
+use crate::intelligence::manager::{AgentManager, normalize_agent_id};
+use crate::routing::delivery::OutboundSinks;
 
 /// Routing decision result
 pub struct RouteResult {
@@ -211,10 +214,13 @@ pub fn build_session_key(
 /// Router backed by a BindingTable and AgentManager
 ///
 /// Falls back to `default_agent_id` when no binding matches.
+/// Also holds outbound sink registry for delivering background output
+/// to the correct frontend.
 pub struct BindingRouter {
     table: BindingTable,
     mgr: AgentManager,
     default_agent_id: String,
+    outbound: Arc<OutboundSinks>,
 }
 
 impl BindingRouter {
@@ -225,15 +231,18 @@ impl BindingRouter {
     /// * `table` - Pre-configured binding table
     /// * `mgr` - Agent manager with registered agents
     /// * `default_agent_id` - Fallback agent when no binding matches
+    /// * `outbound` - Outbound sink registry for background delivery
     pub fn new(
         table: BindingTable,
         mgr: AgentManager,
         default_agent_id: &str,
+        outbound: Arc<OutboundSinks>,
     ) -> Self {
         Self {
             table,
             mgr,
             default_agent_id: normalize_agent_id(default_agent_id),
+            outbound,
         }
     }
 
@@ -255,6 +264,11 @@ impl BindingRouter {
     /// Read access to the agent manager
     pub fn manager(&self) -> &AgentManager {
         &self.mgr
+    }
+
+    /// Access to the outbound sink registry
+    pub fn outbound(&self) -> &Arc<OutboundSinks> {
+        &self.outbound
     }
 }
 
@@ -312,6 +326,11 @@ impl Router for BindingRouter {
 mod tests {
     use super::*;
     use crate::intelligence::manager::AgentConfig;
+    use crate::routing::delivery::BgOutputSink;
+
+    fn test_outbound() -> Arc<OutboundSinks> {
+        Arc::new(OutboundSinks::new(Arc::new(BgOutputSink)))
+    }
 
     fn msg(channel: &str, sender_id: &str) -> UserMessage {
         UserMessage {
@@ -485,7 +504,7 @@ mod tests {
             priority: 0,
         });
 
-        let router = BindingRouter::new(bt, mgr, "luna");
+        let router = BindingRouter::new(bt, mgr, "luna", test_outbound());
 
         let r = router.resolve(&msg("cli", "user1"));
         assert_eq!(r.agent_id, "luna");
@@ -500,7 +519,7 @@ mod tests {
     fn test_binding_router_fallback() {
         let mgr = AgentManager::new("m".into());
         let bt = BindingTable::new();
-        let router = BindingRouter::new(bt, mgr, "mandeven");
+        let router = BindingRouter::new(bt, mgr, "mandeven", test_outbound());
 
         let r = router.resolve(&msg("cli", "user1"));
         assert_eq!(r.agent_id, "mandeven");
@@ -519,7 +538,7 @@ mod tests {
             workspace_dir: String::new(),
         });
         let bt = BindingTable::new();
-        let router = BindingRouter::new(bt, mgr, "mandeven");
+        let router = BindingRouter::new(bt, mgr, "mandeven", test_outbound());
 
         let r = router.resolve_explicit("sage", &msg("discord", "user1"));
         assert_eq!(r.agent_id, "sage");
