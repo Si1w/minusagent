@@ -20,6 +20,7 @@ use crate::routing::router::{Binding, BindingRouter, Router};
 use crate::scheduler::LaneLock;
 use crate::scheduler::cron::{CronHandle, CronJobStatus};
 use crate::scheduler::heartbeat::HeartbeatHandle;
+use crate::scheduler::lane::CommandQueue;
 
 /// Global LLM provider config (shared across all agents)
 pub struct ProviderConfig {
@@ -284,8 +285,8 @@ impl Gateway {
                     intelligence,
                 );
 
-                let lane_lock =
-                    LaneLock::new(tokio::sync::Mutex::new(()));
+                let lane_lock: LaneLock =
+                    Arc::new(CommandQueue::new());
 
                 // Spawn heartbeat before session so we can pass
                 // the handle into Session

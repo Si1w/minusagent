@@ -8,7 +8,7 @@ use crate::core::store::LLMConfig;
 use crate::intelligence::memory::MemoryStore;
 use crate::intelligence::prompt::format_memory_content;
 use crate::routing::delivery::DeliveryHandle;
-use crate::scheduler::{LaneLock, run_single_turn};
+use crate::scheduler::{LANE_SESSION, LaneLock, run_single_turn};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -167,22 +167,21 @@ impl HeartbeatRunner {
         Some((instructions, prompt))
     }
 
-    /// Execute one heartbeat. Non-blocking lock acquire; skip if busy.
+    /// Execute one heartbeat. Skip if session lane is active.
     async fn execute(&mut self) {
-        let lock = self.lane_lock.clone();
-        let guard = match lock.try_lock() {
-            Ok(g) => g,
-            Err(_) => {
-                log::debug!("Heartbeat skipped: main lane occupied");
-                return;
-            }
-        };
+        let stats = self.lane_lock.lane_stats(LANE_SESSION).await;
+        if stats.map_or(false, |s| s.active > 0) {
+            log::debug!("Heartbeat skipped: session lane occupied");
+            return;
+        }
+
+        self.lane_lock.mark_active(LANE_SESSION).await;
         self.running = true;
         log::debug!("Heartbeat executing");
 
         let result = self.execute_inner().await;
 
-        drop(guard);
+        self.lane_lock.mark_done(LANE_SESSION).await;
         self.running = false;
         self.last_run_at = now_secs();
 
@@ -396,7 +395,7 @@ mod tests {
     fn test_runner() -> HeartbeatRunner {
         HeartbeatRunner {
             heartbeat_path: PathBuf::from("/tmp/nonexistent_heartbeat.md"),
-            lane_lock: LaneLock::new(tokio::sync::Mutex::new(())),
+            lane_lock: std::sync::Arc::new(crate::scheduler::lane::CommandQueue::new()),
             llm_config: LLMConfig {
                 model: String::new(),
                 base_url: String::new(),
