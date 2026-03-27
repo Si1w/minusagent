@@ -56,7 +56,7 @@ impl TuiLogger {
 
 impl Log for TuiLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= log::Level::Debug
+        metadata.level() <= log::max_level()
     }
 
     fn log(&self, record: &Record) {

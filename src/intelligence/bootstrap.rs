@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::intelligence::PromptMode;
+
 const MAX_FILE_CHARS: usize = 20_000;
 const MAX_TOTAL_CHARS: usize = 150_000;
 
@@ -33,19 +35,15 @@ impl BootstrapLoader {
 
     /// Load all bootstrap files for the given mode
     ///
-    /// # Arguments
-    ///
-    /// * `mode` - "full", "minimal", or "none"
-    ///
     /// # Returns
     ///
     /// Map of filename to (possibly truncated) content.
-    pub fn load_all(&self, mode: &str) -> HashMap<String, String> {
-        if mode == "none" {
+    pub fn load_all(&self, mode: PromptMode) -> HashMap<String, String> {
+        if mode == PromptMode::None {
             return HashMap::new();
         }
 
-        let names: &[&str] = if mode == "minimal" {
+        let names: &[&str] = if mode == PromptMode::Minimal {
             &["AGENTS.md", "TOOLS.md"]
         } else {
             BOOTSTRAP_FILES
@@ -78,13 +76,23 @@ impl BootstrapLoader {
         std::fs::read_to_string(self.workspace_dir.join(name)).ok()
     }
 
-    fn truncate(content: &str, max_chars: usize) -> String {
-        if content.len() <= max_chars {
+    fn truncate(content: &str, max_bytes: usize) -> String {
+        if content.len() <= max_bytes {
             return content.to_string();
         }
-        let cut = content[..max_chars].rfind('\n').unwrap_or(max_chars);
+        // Find a char-safe boundary at or before max_bytes
+        let safe = match content.get(..max_bytes) {
+            Some(s) => s.len(),
+            None => content
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i <= max_bytes)
+                .last()
+                .unwrap_or(0),
+        };
+        let cut = content[..safe].rfind('\n').unwrap_or(safe);
         format!(
-            "{}\n\n[... truncated ({} chars total, showing first {}) ...]",
+            "{}\n\n[... truncated ({} bytes total, showing first {}) ...]",
             &content[..cut],
             content.len(),
             cut,
@@ -100,7 +108,7 @@ mod tests {
     #[test]
     fn test_load_all_none() {
         let loader = BootstrapLoader::new(Path::new("/nonexistent"));
-        let result = loader.load_all("none");
+        let result = loader.load_all(PromptMode::None);
         assert!(result.is_empty());
     }
 
@@ -111,7 +119,7 @@ mod tests {
         fs::write(dir.path().join("USER.md"), "User info.").unwrap();
 
         let loader = BootstrapLoader::new(dir.path());
-        let result = loader.load_all("full");
+        let result = loader.load_all(PromptMode::Full);
         assert_eq!(result.get("TOOLS.md").unwrap(), "Use tools wisely.");
         assert_eq!(result.get("USER.md").unwrap(), "User info.");
         assert!(!result.contains_key("SOUL.md"));
@@ -124,7 +132,7 @@ mod tests {
         fs::write(dir.path().join("USER.md"), "User info.").unwrap();
 
         let loader = BootstrapLoader::new(dir.path());
-        let result = loader.load_all("minimal");
+        let result = loader.load_all(PromptMode::Minimal);
         assert_eq!(result.get("TOOLS.md").unwrap(), "Use tools wisely.");
         assert!(!result.contains_key("USER.md"));
     }

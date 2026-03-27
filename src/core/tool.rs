@@ -6,10 +6,13 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::fs;
 use tokio::process::Command;
+use tokio::time::Duration;
 
 use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore};
 use crate::frontend::Channel;
+
+const BASH_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Tool definition for LLM function calling registration
 #[derive(Debug, Clone, Serialize)]
@@ -50,11 +53,12 @@ impl Node for BashExec {
     }
 
     async fn exec(&self, command: String) -> Result<String> {
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(&command)
-            .output()
-            .await?;
+        let output = tokio::time::timeout(
+            BASH_TIMEOUT,
+            Command::new("sh").arg("-c").arg(&command).output(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("command timed out after {}s", BASH_TIMEOUT.as_secs()))??;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -421,15 +425,13 @@ fn safe_path(raw: &str) -> Result<String> {
         }
     })?;
 
-    let target_str = target.to_string_lossy();
-    let workdir_str = workdir.to_string_lossy();
-    if !target_str.starts_with(workdir_str.as_ref()) {
+    if !target.starts_with(&workdir) {
         return Err(anyhow::anyhow!(
             "Path traversal blocked: {raw} resolves outside workdir"
         ));
     }
 
-    Ok(target_str.into_owned())
+    Ok(target.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]

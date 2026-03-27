@@ -1,5 +1,7 @@
 use std::collections::HashSet;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use tokio::sync::RwLock;
 use std::time::Instant;
 
 mod core;
@@ -42,7 +44,7 @@ async fn main() {
         start_time: Instant::now(),
     }));
 
-    let gateway = Arc::new(Gateway::new(state, provider));
+    let gateway = Arc::new(Gateway::new(state, provider).await);
     let cli: Arc<dyn Channel> = Arc::new(Cli::new());
 
     frontend::repl::run(gateway, cli).await;

@@ -5,7 +5,7 @@ use anyhow::Result;
 
 use crate::core::node::Node;
 use crate::core::store::SharedStore;
-use crate::intelligence::utils::{parse_frontmatter};
+use crate::intelligence::utils::discover_files;
 
 /// A discovered memory entry (frontmatter only, body not loaded)
 #[derive(Debug, Clone)]
@@ -41,52 +41,22 @@ impl MemoryStore {
 
     /// Scan memory directory and load frontmatter only
     pub fn discover(&mut self) {
-        let read_dir = match std::fs::read_dir(&self.memory_dir) {
-            Ok(d) => d,
-            Err(_) => return,
-        };
-
-        let mut files: Vec<_> = read_dir
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path().extension().is_some_and(|ext| ext == "md")
-            })
-            .collect();
-        files.sort_by_key(|e| e.file_name());
-
         let mut seen: HashMap<String, MemoryEntry> = HashMap::new();
-        for file in files {
-            let content = match std::fs::read_to_string(file.path()) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-
-            let meta = parse_frontmatter(&content);
-            let tldr = match meta.get("tldr") {
+        for f in discover_files(&self.memory_dir, "md") {
+            let tldr = match f.meta.get("tldr") {
                 Some(t) if !t.is_empty() => t.clone(),
                 _ => continue,
             };
-
-            // id from frontmatter, fallback to filename stem
-            let name = meta
+            let name = f.meta
                 .get("id")
                 .filter(|s| !s.is_empty())
                 .cloned()
-                .unwrap_or_else(|| {
-                    file.path()
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_default()
-                });
+                .unwrap_or(f.name);
 
-            seen.insert(name.clone(), MemoryEntry {
-                name,
-                tldr,
-                path: file.path(),
-            });
+            seen.insert(name.clone(), MemoryEntry { name, tldr, path: f.path });
         }
-
         self.entries = seen.into_values().collect();
+        self.entries.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
 }
@@ -156,7 +126,9 @@ impl Node for MemoryWrite {
 
         // Write .md file with frontmatter
         std::fs::create_dir_all(&prep.memory_dir)?;
-        let path = prep.memory_dir.join(format!("{}.md", prep.name));
+        // Sanitize name to prevent path traversal
+        let safe_name = prep.name.replace(['/', '\\', '.'], "_");
+        let path = prep.memory_dir.join(format!("{safe_name}.md"));
         // Sanitize TLDR to single line
         let tldr = tldr
             .lines()
@@ -165,14 +137,15 @@ impl Node for MemoryWrite {
             .trim()
             .to_string();
 
+        let escaped_tldr = tldr.replace(':', "：");
         let file_content = format!(
-            "---\nid: {}\ntldr: {tldr}\n---\n\n{}",
-            prep.name, prep.content,
+            "---\nid: {safe_name}\ntldr: {escaped_tldr}\n---\n\n{}",
+            prep.content,
         );
         tokio::fs::write(&path, &file_content).await?;
 
         Ok(MemoryWriteResult {
-            name: prep.name,
+            name: safe_name,
             tldr,
             path,
         })

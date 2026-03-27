@@ -8,6 +8,28 @@ pub mod utils;
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Prompt assembly mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
+pub enum PromptMode {
+    /// All layers: identity, tools, skills, memory, bootstrap, runtime, channel
+    Full,
+    /// Subset: identity, tools, bootstrap (AGENTS.md + TOOLS.md only), runtime
+    Minimal,
+    /// Identity + runtime only, no bootstrap files loaded
+    None,
+}
+
+impl std::fmt::Display for PromptMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Full => write!(f, "full"),
+            Self::Minimal => write!(f, "minimal"),
+            Self::None => write!(f, "none"),
+        }
+    }
+}
+
 use crate::intelligence::bootstrap::BootstrapLoader;
 use crate::intelligence::memory::MemoryStore;
 use crate::intelligence::skills::{Skill, SkillsManager};
@@ -46,7 +68,7 @@ impl Intelligence {
         model: String,
     ) -> Self {
         let loader = BootstrapLoader::new(workspace_dir);
-        let bootstrap_data = loader.load_all("full");
+        let bootstrap_data = loader.load_all(PromptMode::Full);
 
         let mut skills_mgr = SkillsManager::new(workspace_dir);
         skills_mgr.discover(&[]);
@@ -73,7 +95,7 @@ impl Intelligence {
     /// Build the system prompt from all loaded layers
     pub fn build_prompt(&self) -> String {
         prompt::build_system_prompt(
-            "full",
+            PromptMode::Full,
             &self.identity,
             &self.bootstrap_data,
             &self.skills,

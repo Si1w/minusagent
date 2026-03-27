@@ -9,7 +9,7 @@ use tokio::time::Duration;
 
 use crate::core::store::LLMConfig;
 use crate::routing::delivery::DeliveryHandle;
-use crate::scheduler::run_single_turn;
+use crate::scheduler::{now_secs, run_single_turn};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const AUTO_DISABLE_THRESHOLD: u32 = 5;
@@ -479,13 +479,6 @@ pub fn spawn(
     });
 
     CronHandle { cmd_tx }
-}
-
-fn now_secs() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64()
 }
 
 fn format_timestamp(ts: f64) -> String {

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 
+use crate::intelligence::PromptMode;
 use crate::intelligence::memory::MemoryEntry;
 use crate::intelligence::skills::Skill;
 
@@ -64,7 +65,7 @@ pub fn format_skills_content(skills: &[Skill]) -> String {
 /// 6. Runtime context (agent_id, model, time, mode)
 /// 7. Channel hints
 pub fn build_system_prompt(
-    mode: &str,
+    mode: PromptMode,
     identity: &str,
     bootstrap: &HashMap<String, String>,
     skills: &[Skill],
@@ -73,7 +74,7 @@ pub fn build_system_prompt(
     model: &str,
     channel: &str,
 ) -> String {
-    let is_full = mode == "full";
+    let is_full = mode == PromptMode::Full;
     let mut sections: Vec<String> = Vec::new();
 
     // Layer 1: Identity (AGENT.md body)
@@ -100,7 +101,7 @@ pub fn build_system_prompt(
     }
 
     // Layer 5: Bootstrap context
-    if is_full || mode == "minimal" {
+    if is_full || mode == PromptMode::Minimal {
         for name in ["HEARTBEAT.md", "BOOTSTRAP.md", "AGENTS.md", "USER.md"] {
             let title = name.trim_end_matches(".md");
             sections.extend(section(
@@ -150,7 +151,7 @@ mod tests {
     #[test]
     fn test_identity_in_prompt() {
         let prompt = build_system_prompt(
-            "full", "You are Luna.", &HashMap::new(),
+            PromptMode::Full, "You are Luna.", &HashMap::new(),
             &[], &[], "luna", "gpt-4", "cli",
         );
         assert!(prompt.starts_with("You are Luna."));
@@ -160,7 +161,7 @@ mod tests {
     #[test]
     fn test_empty_identity() {
         let prompt = build_system_prompt(
-            "full", "", &HashMap::new(),
+            PromptMode::Full, "", &HashMap::new(),
             &[], &[], "main", "gpt-4", "cli",
         );
         // Should not start with an empty section
@@ -181,7 +182,7 @@ mod tests {
             path: "/memory/fact.md".into(),
         }];
         let prompt = build_system_prompt(
-            "minimal", "Identity.", &HashMap::new(),
+            PromptMode::Minimal, "Identity.", &HashMap::new(),
             &skills, &memories, "main", "gpt-4", "cli",
         );
         assert!(!prompt.contains("Available Skills"));
@@ -196,7 +197,7 @@ mod tests {
             path: "/workspace/memory/dark_mode.md".into(),
         }];
         let prompt = build_system_prompt(
-            "full", "Identity.", &HashMap::new(),
+            PromptMode::Full, "Identity.", &HashMap::new(),
             &[], &memories, "main", "gpt-4", "cli",
         );
         assert!(prompt.contains("# Memory"));
@@ -212,7 +213,7 @@ mod tests {
             path: "/skills/greet/SKILL.md".into(),
         }];
         let prompt = build_system_prompt(
-            "full", "Identity.", &HashMap::new(),
+            PromptMode::Full, "Identity.", &HashMap::new(),
             &skills, &[], "main", "gpt-4", "cli",
         );
         assert!(prompt.contains("# Available Skills"));
