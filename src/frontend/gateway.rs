@@ -333,9 +333,19 @@ impl Gateway {
                 let (stx, mut srx) =
                     mpsc::channel::<SessionMessage>(8);
                 tokio::spawn(async move {
-                    let mut session =
-                        Session::new(store, lock, hb_handle)
-                            .expect("Failed to create session");
+                    let mut session = match Session::new(store, lock, hb_handle) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            log::error!("Failed to create session: {e}");
+                            if let Some(msg) = srx.recv().await {
+                                msg.frontend.send(&format!("Error: {e}")).await;
+                                if let Some(done) = msg.done {
+                                    let _ = done.send(());
+                                }
+                            }
+                            return;
+                        }
+                    };
                     while let Some(msg) = srx.recv().await {
                         if let Err(e) = session
                             .turn(&msg.text, &msg.frontend)

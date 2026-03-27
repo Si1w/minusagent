@@ -76,6 +76,7 @@ impl SkillsManager {
         }
 
         self.skills = seen.into_values().collect();
+        self.skills.sort_by(|a, b| a.name.cmp(&b.name));
         self.skills.truncate(MAX_SKILLS);
     }
 }

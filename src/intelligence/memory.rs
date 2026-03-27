@@ -56,6 +56,7 @@ impl MemoryStore {
             seen.insert(name.clone(), MemoryEntry { name, tldr, path: f.path });
         }
         self.entries = seen.into_values().collect();
+        self.entries.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
 }
