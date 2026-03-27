@@ -6,6 +6,7 @@ mod core;
 mod frontend;
 mod intelligence;
 mod logger;
+mod resilience;
 mod routing;
 mod scheduler;
 

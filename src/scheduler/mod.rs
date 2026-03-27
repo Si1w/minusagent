@@ -1,5 +1,6 @@
 pub mod cron;
 pub mod heartbeat;
+pub mod lane;
 
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -11,8 +12,11 @@ use crate::core::store::{
 };
 use crate::frontend::SilentChannel;
 
-/// Per-session lane lock: user turns block, background tasks yield
-pub type LaneLock = Arc<tokio::sync::Mutex<()>>;
+/// Per-session lane name shared by user turns and heartbeat
+pub const LANE_SESSION: &str = "session";
+
+/// Per-session command queue for lane-based coordination
+pub type LaneLock = Arc<lane::CommandQueue>;
 
 static BG_OUTPUT: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 

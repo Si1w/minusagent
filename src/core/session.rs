@@ -6,13 +6,14 @@ use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::core::agent::Agent;
 use crate::core::llm::LLMCall;
 use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore};
 use crate::frontend::{Channel, SilentChannel};
 use crate::intelligence::memory::MemoryWrite;
-use crate::scheduler::LaneLock;
+use crate::resilience::profile::ProfileManager;
+use crate::resilience::runner::ResilienceRunner;
+use crate::scheduler::{LANE_SESSION, LaneLock};
 use crate::scheduler::heartbeat::HeartbeatHandle;
 
 const SESSIONS_DIR: &str = "sessions";
@@ -189,7 +190,7 @@ impl SessionStore {
 pub struct Session {
     store: SharedStore,
     session_store: SessionStore,
-    agent: Agent,
+    resilience: ResilienceRunner,
     http: reqwest::Client,
     lane_lock: LaneLock,
     heartbeat: Option<HeartbeatHandle>,
@@ -209,23 +210,45 @@ impl Session {
         heartbeat: Option<HeartbeatHandle>,
     ) -> Result<Self> {
         let session_store = SessionStore::new(Path::new(SESSIONS_DIR))?;
-        let agent = Agent;
         let http = reqwest::Client::new();
-        Ok(Self { store, session_store, agent, http, lane_lock, heartbeat })
+
+        let profiles = ProfileManager::from_env(
+            &store.state.config.llm.api_key,
+            &store.state.config.llm.base_url,
+        );
+        let fallbacks = ResilienceRunner::fallback_models_from_env();
+        let resilience = ResilienceRunner::new(profiles, fallbacks);
+
+        Ok(Self {
+            store,
+            session_store,
+            resilience,
+            http,
+            lane_lock,
+            heartbeat,
+        })
     }
 
     /// Handle one user input: dispatch `/` commands or run agent turn
     ///
-    /// Acquires the lane lock for the duration of the turn, ensuring
-    /// background tasks (heartbeat) yield when a user is active.
+    /// Marks the session lane as active for the duration, so background
+    /// tasks (heartbeat) yield when a user is active.
     pub async fn turn(
         &mut self,
         input: &str,
         channel: &Arc<dyn Channel>,
     ) -> Result<()> {
-        let lock = self.lane_lock.clone();
-        let _guard = lock.lock().await;
+        self.lane_lock.mark_active(LANE_SESSION).await;
+        let result = self.turn_inner(input, channel).await;
+        self.lane_lock.mark_done(LANE_SESSION).await;
+        result
+    }
 
+    async fn turn_inner(
+        &mut self,
+        input: &str,
+        channel: &Arc<dyn Channel>,
+    ) -> Result<()> {
         if input.starts_with('/') {
             return self.handle_command(input, channel).await;
         }
@@ -248,8 +271,10 @@ impl Session {
             tool_call_id: None,
         });
 
-        let total_tokens =
-            self.agent.run(&mut self.store, channel, &self.http).await?;
+        let total_tokens = self
+            .resilience
+            .run(&mut self.store, channel, &self.http)
+            .await?;
 
         // Check if compaction is needed
         let context_window = self.store.state.config.llm.context_window;
@@ -387,6 +412,10 @@ impl Session {
                          \x20 /remember <name> <txt>  Save memory\n\
                          \x20 /<skill> [args]         Invoke skill\n\
                          \n\
+                         Resilience\n\
+                         \x20 /profiles               Show API key profiles\n\
+                         \x20 /lanes                   Show lane stats\n\
+                         \n\
                          /help",
                     )
                     .await;
@@ -522,6 +551,35 @@ impl Session {
                         .await;
                 }
             },
+            "/profiles" => {
+                let lines = self.resilience.profile_status();
+                let output = format!(
+                    "Profiles ({}):\n{}",
+                    lines.len(),
+                    lines.join("\n")
+                );
+                channel.send(&output).await;
+            }
+            "/lanes" => {
+                let stats = self.lane_lock.all_stats().await;
+                if stats.is_empty() {
+                    channel.send("No lanes.").await;
+                } else {
+                    let mut output = String::from("Lanes:\n");
+                    for s in &stats {
+                        output.push_str(&format!(
+                            "  {:<14} active={}  queued={}  \
+                             max={}  gen={}\n",
+                            s.name,
+                            s.active,
+                            s.queued,
+                            s.max_concurrency,
+                            s.generation,
+                        ));
+                    }
+                    channel.send(&output).await;
+                }
+            }
             "/remember" => {
                 let rem_parts: Vec<&str> =
                     arg.splitn(2, ' ').collect();
@@ -589,7 +647,7 @@ impl Session {
                         tool_calls: None,
                         tool_call_id: None,
                     });
-                    self.agent
+                    self.resilience
                         .run(&mut self.store, channel, &self.http)
                         .await?;
                     return Ok(());
