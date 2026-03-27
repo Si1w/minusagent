@@ -78,13 +78,23 @@ impl BootstrapLoader {
         std::fs::read_to_string(self.workspace_dir.join(name)).ok()
     }
 
-    fn truncate(content: &str, max_chars: usize) -> String {
-        if content.len() <= max_chars {
+    fn truncate(content: &str, max_bytes: usize) -> String {
+        if content.len() <= max_bytes {
             return content.to_string();
         }
-        let cut = content[..max_chars].rfind('\n').unwrap_or(max_chars);
+        // Find a char-safe boundary at or before max_bytes
+        let safe = match content.get(..max_bytes) {
+            Some(s) => s.len(),
+            None => content
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i <= max_bytes)
+                .last()
+                .unwrap_or(0),
+        };
+        let cut = content[..safe].rfind('\n').unwrap_or(safe);
         format!(
-            "{}\n\n[... truncated ({} chars total, showing first {}) ...]",
+            "{}\n\n[... truncated ({} bytes total, showing first {}) ...]",
             &content[..cut],
             content.len(),
             cut,

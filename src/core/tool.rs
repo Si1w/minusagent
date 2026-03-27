@@ -421,15 +421,13 @@ fn safe_path(raw: &str) -> Result<String> {
         }
     })?;
 
-    let target_str = target.to_string_lossy();
-    let workdir_str = workdir.to_string_lossy();
-    if !target_str.starts_with(workdir_str.as_ref()) {
+    if !target.starts_with(&workdir) {
         return Err(anyhow::anyhow!(
             "Path traversal blocked: {raw} resolves outside workdir"
         ));
     }
 
-    Ok(target_str.into_owned())
+    Ok(target.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]

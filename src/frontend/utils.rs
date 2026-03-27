@@ -16,10 +16,27 @@ pub fn chunk_text(text: &str, max_len: usize) -> Vec<&str> {
             chunks.push(&text[start..]);
             break;
         }
-        let cut = text[start..end]
+        // Find a char-safe boundary at or before end
+        let safe_end = if text.is_char_boundary(end) {
+            end
+        } else {
+            text[start..end]
+                .char_indices()
+                .map(|(i, _)| start + i)
+                .last()
+                .unwrap_or(start)
+        };
+        if safe_end <= start {
+            // Single char wider than max_len — take one char to avoid infinite loop
+            let next = start + text[start..].chars().next().map_or(1, |c| c.len_utf8());
+            chunks.push(&text[start..next]);
+            start = next;
+            continue;
+        }
+        let cut = text[start..safe_end]
             .rfind('\n')
             .map(|i| start + i + 1)
-            .unwrap_or(end);
+            .unwrap_or(safe_end);
         chunks.push(&text[start..cut]);
         start = cut;
     }

@@ -568,13 +568,9 @@ impl Session {
                     let mut output = String::from("Lanes:\n");
                     for s in &stats {
                         output.push_str(&format!(
-                            "  {:<14} active={}  queued={}  \
-                             max={}  gen={}\n",
+                            "  {:<14} active={}\n",
                             s.name,
                             s.active,
-                            s.queued,
-                            s.max_concurrency,
-                            s.generation,
                         ));
                     }
                     channel.send(&output).await;

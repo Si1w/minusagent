@@ -573,11 +573,11 @@ pub async fn start_gateway(
                         continue;
                     }
 
+                    let preview: String = msg.content.chars().take(80).collect();
                     log::debug!(
                         "Discord: message from {}: {}",
                         msg.author.id,
-                        &msg.content
-                            [..msg.content.len().min(80)]
+                        preview
                     );
 
                     // Check pending confirmation

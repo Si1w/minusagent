@@ -244,9 +244,10 @@ impl Node for LLMCall {
 
                 if let Some(tcs) = choice.delta.tool_calls {
                     for tc in tcs {
-                        if tc.index >= tool_calls.len() {
+                        // Fill gaps for non-contiguous indices
+                        while tc.index >= tool_calls.len() {
                             tool_calls.push(ResponseToolCall {
-                                id: tc.id.unwrap_or_default(),
+                                id: tc.id.clone().unwrap_or_default(),
                                 name: tc.function
                                     .as_ref()
                                     .and_then(|f| f.name.clone())
@@ -254,9 +255,16 @@ impl Node for LLMCall {
                                 arguments: String::new(),
                             });
                         }
-                        if let Some(f) = tc.function {
-                            if let Some(args) = f.arguments {
-                                tool_calls[tc.index].arguments.push_str(&args);
+                        // Update id/name if provided on this chunk
+                        if let Some(id) = &tc.id {
+                            tool_calls[tc.index].id = id.clone();
+                        }
+                        if let Some(f) = &tc.function {
+                            if let Some(name) = &f.name {
+                                tool_calls[tc.index].name = name.clone();
+                            }
+                            if let Some(args) = &f.arguments {
+                                tool_calls[tc.index].arguments.push_str(args);
                             }
                         }
                     }

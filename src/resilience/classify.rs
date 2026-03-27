@@ -49,7 +49,7 @@ pub fn classify_failure(err: &anyhow::Error) -> FailoverReason {
     if msg.contains("429") || msg.contains("rate") || msg.contains("too many") {
         return FailoverReason::RateLimit;
     }
-    if msg.contains("401") || msg.contains("auth") || msg.contains("invalid.*key") {
+    if msg.contains("401") || msg.contains("auth") || msg.contains("invalid key") || msg.contains("invalid api key") {
         return FailoverReason::Auth;
     }
     if msg.contains("timeout") || msg.contains("timed out") || msg.contains("deadline") {
