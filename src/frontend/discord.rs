@@ -13,6 +13,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use crate::frontend::gateway::Gateway;
 use crate::frontend::utils::chunk_text;
 use crate::frontend::{Channel, UserMessage};
+use crate::routing::delivery::DeliverySink;
 
 const GATEWAY_URL: &str =
     "wss://gateway.discord.gg/?v=10&encoding=json";
@@ -145,6 +146,51 @@ impl Channel for DiscordReply {
     }
 }
 
+/// Delivery sink for sending messages to Discord channels via REST API
+pub struct DiscordSink {
+    token: String,
+    http: reqwest::Client,
+}
+
+impl DiscordSink {
+    pub fn new(token: String, http: reqwest::Client) -> Self {
+        Self { token, http }
+    }
+}
+
+#[async_trait::async_trait]
+impl DeliverySink for DiscordSink {
+    /// Deliver a message to a Discord channel
+    ///
+    /// `to` is a Discord channel ID.
+    async fn deliver(
+        &self,
+        to: &str,
+        text: &str,
+    ) -> std::result::Result<(), String> {
+        if to.is_empty() {
+            return Err("Discord sink: empty channel_id".into());
+        }
+        for chunk in chunk_text(text, MAX_MSG_LEN) {
+            self.http
+                .post(format!(
+                    "{API_BASE}/channels/{to}/messages"
+                ))
+                .header(
+                    "Authorization",
+                    format!("Bot {}", self.token),
+                )
+                .json(&json!({ "content": chunk }))
+                .send()
+                .await
+                .map_err(|e| e.to_string())?
+                .error_for_status()
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+}
+
 // --- Gateway protocol helpers ---
 
 /// Build a heartbeat payload from the current sequence number
@@ -226,6 +272,17 @@ pub async fn start_gateway(
     gateway: Arc<Gateway>,
 ) -> Result<()> {
     let http = reqwest::Client::new();
+
+    // Register Discord sink for outbound delivery
+    {
+        let s = gateway.state().read().expect("State lock poisoned");
+        s.router.outbound().register(
+            "discord",
+            Arc::new(DiscordSink::new(token.clone(), http.clone())),
+        );
+    }
+    log::info!("Discord: registered outbound sink");
+
     let pending_confirms: PendingConfirms =
         Arc::new(Mutex::new(HashMap::new()));
     let seq = Arc::new(AtomicI64::new(-1));

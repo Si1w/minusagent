@@ -13,6 +13,7 @@ use crate::frontend::cli::Cli;
 use crate::frontend::gateway::{AppState, Gateway, ProviderConfig};
 use crate::frontend::Channel;
 use crate::intelligence::manager::AgentManager;
+use crate::routing::delivery::{BgOutputSink, OutboundSinks};
 use crate::routing::router::{BindingRouter, BindingTable};
 
 #[tokio::main]
@@ -31,7 +32,8 @@ async fn main() {
     if let Some(ws) = &provider.workspace_dir {
         table.load_file(&ws.join("routes.json"));
     }
-    let router = BindingRouter::new(table, mgr, "mandeven");
+    let outbound = Arc::new(OutboundSinks::new(Arc::new(BgOutputSink)));
+    let router = BindingRouter::new(table, mgr, "mandeven", outbound);
 
     let state = Arc::new(RwLock::new(AppState {
         router,

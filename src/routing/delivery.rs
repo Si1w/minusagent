@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,79 @@ const BACKOFF_MS: [u64; 4] = [5_000, 25_000, 120_000, 600_000];
 const MAX_RETRIES: u32 = 5;
 const SCAN_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_CHUNK_LIMIT: usize = 4096;
+
+/// Async delivery target for outbound messages
+#[async_trait::async_trait]
+pub trait DeliverySink: Send + Sync {
+    async fn deliver(
+        &self,
+        to: &str,
+        text: &str,
+    ) -> std::result::Result<(), String>;
+}
+
+/// Routes outbound messages to registered per-channel sinks
+///
+/// Falls back to the default sink when no sink is registered for a channel.
+pub struct OutboundSinks {
+    sinks: RwLock<HashMap<String, Arc<dyn DeliverySink>>>,
+    fallback: Arc<dyn DeliverySink>,
+}
+
+impl OutboundSinks {
+    /// Create with a fallback sink for unregistered channels
+    pub fn new(fallback: Arc<dyn DeliverySink>) -> Self {
+        Self {
+            sinks: RwLock::new(HashMap::new()),
+            fallback,
+        }
+    }
+
+    /// Register a sink for a channel type (e.g. "discord", "websocket")
+    pub fn register(
+        &self,
+        channel: &str,
+        sink: Arc<dyn DeliverySink>,
+    ) {
+        self.sinks
+            .write()
+            .expect("Sink registry lock poisoned")
+            .insert(channel.to_string(), sink);
+    }
+
+    /// Route a message to the appropriate sink
+    pub async fn deliver(
+        &self,
+        channel: &str,
+        to: &str,
+        text: &str,
+    ) -> std::result::Result<(), String> {
+        let sink = {
+            let sinks =
+                self.sinks.read().expect("Sink registry lock poisoned");
+            sinks.get(channel).cloned()
+        };
+        match sink {
+            Some(s) => s.deliver(to, text).await,
+            None => self.fallback.deliver(to, text).await,
+        }
+    }
+}
+
+/// Delivers messages to the TUI background output buffer
+pub struct BgOutputSink;
+
+#[async_trait::async_trait]
+impl DeliverySink for BgOutputSink {
+    async fn deliver(
+        &self,
+        _to: &str,
+        text: &str,
+    ) -> std::result::Result<(), String> {
+        crate::scheduler::push_bg_output(text.to_string());
+        Ok(())
+    }
+}
 
 /// A queued delivery entry persisted to disk
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,22 +302,17 @@ impl DeliveryHandle {
 /// Spawn the delivery runner and return a clonable handle
 ///
 /// The runner scans the queue directory every second and delivers
-/// due entries via `deliver_fn`. On startup it cleans orphaned tmp
+/// due entries via `sinks`. On startup it cleans orphaned tmp
 /// files and retries entries left from a previous crash.
 ///
 /// # Arguments
 ///
 /// * `queue_dir` - Directory for queue files
-/// * `deliver_fn` - Callback `(channel, to, text) -> Result<(), String>`
-pub fn spawn<F>(
+/// * `sinks` - Outbound sink registry for routing deliveries
+pub fn spawn(
     queue_dir: &Path,
-    deliver_fn: F,
-) -> Result<DeliveryHandle>
-where
-    F: Fn(&str, &str, &str) -> std::result::Result<(), String>
-        + Send
-        + 'static,
-{
+    sinks: Arc<OutboundSinks>,
+) -> Result<DeliveryHandle> {
     let queue = Arc::new(DeliveryQueue::new(queue_dir)?);
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<DeliveryCmd>(64);
 
@@ -271,21 +340,21 @@ where
             tokio::select! {
                 _ = tick.tick() => {
                     process_pending(
-                        &runner_queue, &deliver_fn,
+                        &runner_queue, &sinks,
                         &mut total_attempted,
                         &mut total_succeeded,
                         &mut total_failed,
-                    );
+                    ).await;
                 }
                 cmd = cmd_rx.recv() => {
                     match cmd {
                         Some(DeliveryCmd::Wake) => {
                             process_pending(
-                                &runner_queue, &deliver_fn,
+                                &runner_queue, &sinks,
                                 &mut total_attempted,
                                 &mut total_succeeded,
                                 &mut total_failed,
-                            );
+                            ).await;
                         }
                         Some(DeliveryCmd::Stats(reply)) => {
                             let pending = runner_queue
@@ -310,15 +379,13 @@ where
 }
 
 /// Process all due pending entries
-fn process_pending<F>(
+async fn process_pending(
     queue: &DeliveryQueue,
-    deliver_fn: &F,
+    sinks: &OutboundSinks,
     attempted: &mut u64,
     succeeded: &mut u64,
     failed: &mut u64,
-) where
-    F: Fn(&str, &str, &str) -> std::result::Result<(), String>,
-{
+) {
     let pending = match queue.load_pending() {
         Ok(p) => p,
         Err(e) => {
@@ -332,7 +399,8 @@ fn process_pending<F>(
             continue;
         }
         *attempted += 1;
-        match deliver_fn(&entry.channel, &entry.to, &entry.text) {
+        match sinks.deliver(&entry.channel, &entry.to, &entry.text).await
+        {
             Ok(()) => {
                 if let Err(e) = queue.ack(&entry.id) {
                     log::error!("Delivery ack failed: {e}");

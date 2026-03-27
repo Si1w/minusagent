@@ -73,6 +73,8 @@ struct HeartbeatRunner {
     identity: String,
     memory: MemoryStore,
     delivery: DeliveryHandle,
+    delivery_channel: String,
+    delivery_to: String,
     interval: Duration,
     active_hours: (u8, u8),
     last_run_at: f64,
@@ -186,8 +188,11 @@ impl HeartbeatRunner {
 
         if let Err(e) = result {
             log::error!("Heartbeat error: {e}");
-            self.delivery
-                .enqueue("bg", "", &format!("[heartbeat error] {e}"));
+            self.delivery.enqueue(
+                &self.delivery_channel,
+                &self.delivery_to,
+                &format!("[heartbeat error] {e}"),
+            );
         }
     }
 
@@ -210,8 +215,11 @@ impl HeartbeatRunner {
         }
         self.last_output = meaningful.trim().to_string();
         self.output_count += 1;
-        self.delivery
-            .enqueue("bg", "", &format!("[heartbeat] {meaningful}"));
+        self.delivery.enqueue(
+            &self.delivery_channel,
+            &self.delivery_to,
+            &format!("[heartbeat] {meaningful}"),
+        );
         Ok(())
     }
 
@@ -243,8 +251,8 @@ impl HeartbeatRunner {
                             self.output_count += 1;
                             let len = m.len();
                             self.delivery.enqueue(
-                                "bg",
-                                "",
+                                &self.delivery_channel,
+                                &self.delivery_to,
                                 &format!("[heartbeat] {m}"),
                             );
                             format!("triggered, output queued ({len} chars)")
@@ -307,6 +315,8 @@ impl HeartbeatRunner {
 /// * `interval` - Minimum interval between heartbeat runs
 /// * `active_hours` - Active hours range (start, end), e.g. (9, 22)
 /// * `delivery` - Delivery handle for background output
+/// * `delivery_channel` - Outbound channel for delivery (e.g. "bg", "discord")
+/// * `delivery_to` - Outbound target (e.g. Discord channel ID)
 pub fn spawn(
     workspace_dir: PathBuf,
     lane_lock: LaneLock,
@@ -315,6 +325,8 @@ pub fn spawn(
     interval: Duration,
     active_hours: (u8, u8),
     delivery: DeliveryHandle,
+    delivery_channel: String,
+    delivery_to: String,
 ) -> HeartbeatHandle {
     let heartbeat_path = workspace_dir.join("HEARTBEAT.md");
     let mut memory = MemoryStore::new(&workspace_dir.join("memory"));
@@ -331,6 +343,8 @@ pub fn spawn(
         identity,
         memory,
         delivery,
+        delivery_channel,
+        delivery_to,
         interval,
         active_hours,
         last_run_at: 0.0,
@@ -392,6 +406,8 @@ mod tests {
             identity: String::new(),
             memory: MemoryStore::new(&PathBuf::from("/tmp/nonexistent")),
             delivery: DeliveryHandle::noop(),
+            delivery_channel: "bg".into(),
+            delivery_to: String::new(),
             interval: Duration::from_secs(1800),
             active_hours: (9, 22),
             last_run_at: 0.0,
