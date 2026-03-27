@@ -24,7 +24,7 @@ impl Agent {
     ///
     /// # Returns
     ///
-    /// The `prompt_tokens` from the last LLM call, if available.
+    /// The `total_tokens` from the last LLM call, if available.
     /// Session uses this to decide whether to compact.
     ///
     /// # Errors

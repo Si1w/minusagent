@@ -9,7 +9,7 @@ Each tool is a Node (`prep → exec → post`).
 
 ## Built-in Tools
 
-- **bash** — run shell commands, capture stdout/stderr. Blocks dangerous patterns (rm -rf /, sudo, shutdown). Requires `channel.confirm()` before execution.
+- **bash** — run shell commands, capture stdout/stderr. Blocks dangerous patterns (rm -rf /, sudo, shutdown, > /dev/). Requires `channel.confirm()` before execution.
 - **read_file** — read file contents with line numbers. Validates path safety via `safe_path()`.
 - **write_file** — write content to file, creates parent directories. Validates path safety.
 - **edit_file** — replace a unique string in a file. Fails if match count != 1. Validates path safety.

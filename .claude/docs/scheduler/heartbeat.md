@@ -38,7 +38,7 @@ Communication via `mpsc` command channel:
 
 Spawned in `Gateway::dispatch()` when creating a new session whose workspace has `HEARTBEAT.md`. Handle stored in `Gateway.heartbeat_handles`.
 
-## CLI Commands (repl.rs)
+## CLI Commands (session.rs)
 
 - `/heartbeat` — show status for all active heartbeat runners
 - `/trigger` — manually trigger all heartbeat runners

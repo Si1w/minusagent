@@ -26,3 +26,4 @@ Smallest building block. Every operation is a Node: `prep → exec → post`.
 - `LLMCall` — streaming LLM request.
 - `BashExec` — shell command execution.
 - `ReadFile`, `WriteFile`, `EditFile` — file operations.
+- `MemoryWrite` — LLM-generated TLDR, writes memory file and hot-updates index.
