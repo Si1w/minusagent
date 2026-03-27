@@ -267,18 +267,23 @@ impl DeliveryHandle {
     /// Enqueue a message for delivery
     ///
     /// Chunks text by platform limit, writes each chunk to disk, then
-    /// wakes the runner. Silently logs errors on failure.
+    /// wakes the runner. All-or-nothing: if any chunk fails to enqueue,
+    /// previously written chunks are removed.
     pub fn enqueue(&self, channel: &str, to: &str, text: &str) {
         if text.is_empty() {
             return;
         }
         let limit = platform_limit(channel);
         let chunks = chunk_message(text, limit);
+        let mut written_ids: Vec<String> = Vec::new();
         for chunk in chunks {
             match self.queue.enqueue(channel, to, chunk) {
-                Ok(_) => {}
+                Ok(id) => written_ids.push(id),
                 Err(e) => {
                     log::error!("Delivery enqueue failed: {e}");
+                    for id in &written_ids {
+                        let _ = self.queue.ack(id);
+                    }
                     return;
                 }
             }
