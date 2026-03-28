@@ -10,6 +10,7 @@ use crate::core::agent::Agent;
 use crate::core::store::{
     Config, Context, LLMConfig, Message, Role, SharedStore, SystemState,
 };
+use crate::core::task::BackgroundManager;
 use crate::core::todo::TodoManager;
 use crate::frontend::SilentChannel;
 
@@ -99,6 +100,7 @@ pub async fn run_single_turn(
             is_subagent: false,
             agents: crate::intelligence::manager::SharedAgents::empty(),
             tasks: None,
+            background: BackgroundManager::new(),
         },
     };
 

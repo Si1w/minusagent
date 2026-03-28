@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::core::task::TaskManager;
+use crate::core::task::{BackgroundManager, TaskManager};
 use crate::core::todo::TodoManager;
 use crate::intelligence::Intelligence;
 use crate::intelligence::manager::SharedAgents;
@@ -61,6 +61,8 @@ pub struct SystemState {
     pub agents: SharedAgents,
     /// Persistent task graph (workspace-level)
     pub tasks: Option<TaskManager>,
+    /// Background task runner with notification queue
+    pub background: BackgroundManager,
 }
 
 /// Two-layer state container shared across all nodes
@@ -95,6 +97,7 @@ impl SharedStore {
                 is_subagent: false,
                 agents: SharedAgents::empty(),
                 tasks: None,
+                background: BackgroundManager::new(),
             },
         }
     }

@@ -46,6 +46,34 @@ pub async fn cot_loop(
         }
         turns += 1;
 
+        // Drain background task notifications before LLM call
+        let notifs = store.state.background.drain_notifications();
+        if !notifs.is_empty() {
+            let notif_text: String = notifs
+                .iter()
+                .map(|(id, result)| format!("[bg:{id}] {result}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            store.context.history.push(Message {
+                role: Role::User,
+                content: Some(format!(
+                    "<background-results>\n\
+                     {notif_text}\n\
+                     </background-results>"
+                )),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+            store.context.history.push(Message {
+                role: Role::Assistant,
+                content: Some(
+                    "Noted background results.".into(),
+                ),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
+
         let response = llm.run(store).await?;
 
         if let Some(usage) = &response.usage {

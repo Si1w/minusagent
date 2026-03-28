@@ -310,6 +310,7 @@ impl Node for LLMCall {
 mod tests {
     use super::*;
     use crate::core::store::{Config, Context, LLMConfig, SystemState};
+    use crate::core::task::BackgroundManager;
     use crate::core::todo::TodoManager;
     use crate::frontend::SilentChannel;
     use crate::intelligence::manager::SharedAgents;
@@ -343,6 +344,7 @@ mod tests {
                 is_subagent: false,
                 agents: SharedAgents::empty(),
                 tasks: None,
+                background: BackgroundManager::new(),
             },
         };
 
