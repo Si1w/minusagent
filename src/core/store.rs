@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+use crate::core::todo::TodoManager;
 use crate::intelligence::Intelligence;
+use crate::intelligence::manager::SharedAgents;
 
 /// LLM-visible conversation state
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +37,7 @@ pub struct ToolCall {
 }
 
 /// LLM provider configuration
+#[derive(Clone)]
 pub struct LLMConfig {
     pub model: String,
     pub base_url: String,
@@ -51,6 +54,10 @@ pub struct Config {
 pub struct SystemState {
     pub config: Config,
     pub intelligence: Option<Intelligence>,
+    pub todo: TodoManager,
+    pub is_subagent: bool,
+    /// Read-only handle to the shared agent registry
+    pub agents: SharedAgents,
 }
 
 /// Two-layer state container shared across all nodes
@@ -60,4 +67,31 @@ pub struct SystemState {
 pub struct SharedStore {
     pub context: Context,
     pub state: SystemState,
+}
+
+#[cfg(test)]
+impl SharedStore {
+    /// Empty store with default config for unit tests
+    pub fn test_default() -> Self {
+        Self {
+            context: Context {
+                system_prompt: String::new(),
+                history: Vec::new(),
+            },
+            state: SystemState {
+                config: Config {
+                    llm: LLMConfig {
+                        model: String::new(),
+                        base_url: String::new(),
+                        api_key: String::new(),
+                        context_window: 256_000,
+                    },
+                },
+                intelligence: None,
+                todo: TodoManager::new(),
+                is_subagent: false,
+                agents: SharedAgents::empty(),
+            },
+        }
+    }
 }

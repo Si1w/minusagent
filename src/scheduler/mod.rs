@@ -10,6 +10,7 @@ use crate::core::agent::Agent;
 use crate::core::store::{
     Config, Context, LLMConfig, Message, Role, SharedStore, SystemState,
 };
+use crate::core::todo::TodoManager;
 use crate::frontend::SilentChannel;
 
 /// Per-session lane name shared by user turns and heartbeat
@@ -94,6 +95,9 @@ pub async fn run_single_turn(
                 },
             },
             intelligence: None,
+            todo: TodoManager::new(),
+            is_subagent: false,
+            agents: crate::intelligence::manager::SharedAgents::empty(),
         },
     };
 

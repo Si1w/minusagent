@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -10,7 +10,10 @@ use tokio::time::Duration;
 
 use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore};
+use crate::core::subagent::run_subagent;
+use crate::core::todo::{TodoItem, TodoWrite};
 use crate::frontend::Channel;
+use crate::intelligence::manager::normalize_agent_id;
 
 const BASH_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -271,6 +274,47 @@ pub fn write_file_tool() -> ToolDefinition {
     }
 }
 
+pub fn todo_tool() -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: "todo".into(),
+            description: "Update the task plan. Use this to track progress on multi-step \
+                          tasks. Only one task can be in_progress at a time."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {
+                                    "type": "integer",
+                                    "description": "Unique task ID."
+                                },
+                                "text": {
+                                    "type": "string",
+                                    "description": "Task description."
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"],
+                                    "description": "Task status."
+                                }
+                            },
+                            "required": ["id", "text", "status"]
+                        },
+                        "description": "Full list of todo items. Replaces all existing items."
+                    }
+                },
+                "required": ["items"]
+            }),
+        },
+    }
+}
+
 pub fn edit_file_tool() -> ToolDefinition {
     ToolDefinition {
         r#type: "function".into(),
@@ -299,9 +343,47 @@ pub fn edit_file_tool() -> ToolDefinition {
     }
 }
 
+/// Task tool: spawn an agent with isolated context (parent-only)
+pub fn task_tool() -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: "task".into(),
+            description: "Spawn an agent with fresh context to handle a \
+                          subtask. The agent runs in isolation and only \
+                          the final summary is returned."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "The task description."
+                    },
+                    "agent": {
+                        "type": "string",
+                        "description": "Agent ID to handle the task."
+                    }
+                },
+                "required": ["prompt", "agent"]
+            }),
+        },
+    }
+}
+
 /// All built-in tool definitions for LLM registration
-pub fn all_tools() -> Vec<ToolDefinition> {
-    vec![bash_tool(), read_file_tool(), write_file_tool(), edit_file_tool()]
+pub fn all_tools(is_subagent: bool) -> Vec<ToolDefinition> {
+    let mut tools = vec![
+        bash_tool(),
+        read_file_tool(),
+        write_file_tool(),
+        edit_file_tool(),
+        todo_tool(),
+    ];
+    if !is_subagent {
+        tools.push(task_tool());
+    }
+    tools
 }
 
 /// Dispatch a tool call by name
@@ -391,6 +473,85 @@ pub async fn dispatch_tool(
             };
             node.run(store).await?;
         }
+        "todo" => {
+            let items: Vec<TodoItem> = match serde_json::from_value(
+                args["items"].clone(),
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    log::warn!("todo: failed to parse items: {e}");
+                    push_tool_result(
+                        store,
+                        &call_id,
+                        format!("Error: invalid items JSON: {e}"),
+                    );
+                    return Ok(true);
+                }
+            };
+            let node = TodoWrite {
+                call_id: call_id.clone(),
+                items,
+            };
+            if let Err(e) = node.run(store).await {
+                push_tool_result(store, &call_id, format!("Error: {e}"));
+            }
+        }
+        "task" => {
+            if store.state.is_subagent {
+                push_tool_result(
+                    store,
+                    &call_id,
+                    "Error: task tool is not available here".into(),
+                );
+            } else {
+                let prompt = args["prompt"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let agent_id = normalize_agent_id(
+                    args["agent"].as_str().unwrap_or_default(),
+                );
+                let agent_config = store.state.agents.get(&agent_id);
+                match agent_config {
+                    Some(config) => {
+                        let ws_dir = if config.workspace_dir.is_empty() {
+                            None
+                        } else {
+                            Some(PathBuf::from(&config.workspace_dir))
+                        };
+                        let llm_config = store.state.config.llm.clone();
+                        let summary = run_subagent(
+                            prompt,
+                            config.system_prompt.clone(),
+                            llm_config,
+                            ws_dir,
+                            agent_id,
+                            store.state.agents.clone(),
+                        )
+                        .await?;
+                        push_tool_result(store, &call_id, summary);
+                    }
+                    None => {
+                        let available: Vec<String> = store
+                            .state
+                            .agents
+                            .list()
+                            .iter()
+                            .map(|a| a.id.clone())
+                            .collect();
+                        push_tool_result(
+                            store,
+                            &call_id,
+                            format!(
+                                "Error: unknown agent '{}'. Available: {}",
+                                agent_id,
+                                available.join(", ")
+                            ),
+                        );
+                    }
+                }
+            }
+        }
         _ => return Ok(false),
     }
 
@@ -399,7 +560,7 @@ pub async fn dispatch_tool(
 
 // Helpers
 
-fn push_tool_result(store: &mut SharedStore, call_id: &str, content: String) {
+pub(crate) fn push_tool_result(store: &mut SharedStore, call_id: &str, content: String) {
     store.context.history.push(Message {
         role: Role::Tool,
         content: Some(content),
@@ -437,31 +598,10 @@ fn safe_path(raw: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::store::{Config, Context, LLMConfig, SystemState};
-
-    fn empty_store() -> SharedStore {
-        SharedStore {
-            context: Context {
-                system_prompt: String::new(),
-                history: Vec::new(),
-            },
-            state: SystemState {
-                config: Config {
-                    llm: LLMConfig {
-                        model: String::new(),
-                        base_url: String::new(),
-                        api_key: String::new(),
-                        context_window: 256_000,
-                    },
-                },
-                intelligence: None,
-            },
-        }
-    }
 
     #[tokio::test]
     async fn test_bash_exec() {
-        let mut store = empty_store();
+        let mut store = SharedStore::test_default();
         let node = BashExec {
             call_id: "call_123".into(),
             command: "echo hello".into(),
@@ -483,7 +623,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bash_exec_dangerous() {
-        let store = empty_store();
+        let store = SharedStore::test_default();
         let node = BashExec {
             call_id: "call_456".into(),
             command: "sudo rm -rf /".into(),
@@ -495,7 +635,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_and_read_file() {
-        let mut store = empty_store();
+        let mut store = SharedStore::test_default();
         let test_path = "test_rw_output.txt";
 
         // Write
@@ -523,7 +663,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_edit_file() {
-        let mut store = empty_store();
+        let mut store = SharedStore::test_default();
         let test_path = "test_edit_output.txt";
         std::fs::write(test_path, "foo bar baz").unwrap();
 
@@ -552,7 +692,7 @@ mod tests {
             old_string: "nonexistent".into(),
             new_string: "replacement".into(),
         };
-        let result = node.run(&mut empty_store()).await;
+        let result = node.run(&mut SharedStore::test_default()).await;
         assert!(result.is_err());
 
         std::fs::remove_file(test_path).ok();
@@ -569,7 +709,7 @@ mod tests {
             old_string: "aaa".into(),
             new_string: "bbb".into(),
         };
-        let result = node.run(&mut empty_store()).await;
+        let result = node.run(&mut SharedStore::test_default()).await;
         assert!(result.is_err());
 
         std::fs::remove_file(test_path).ok();
@@ -588,5 +728,57 @@ mod tests {
         let result = safe_path("test_safe_path.txt");
         assert!(result.is_ok());
         std::fs::remove_file("test_safe_path.txt").ok();
+    }
+
+    #[tokio::test]
+    async fn test_task_rejects_unknown_agent() {
+        let mut store = SharedStore::test_default();
+        let args = r#"{"prompt":"do something","agent":"nonexistent"}"#;
+        let result =
+            dispatch_tool("task", "t1".into(), args, &mut store, &silent())
+                .await
+                .unwrap();
+        assert!(result);
+
+        let last = store.context.history.last().unwrap();
+        let content = last.content.as_ref().unwrap();
+        assert!(content.contains("Error: unknown agent"));
+        assert!(content.contains("Available:"));
+    }
+
+    #[tokio::test]
+    async fn test_task_blocked_in_subagent() {
+        let mut store = SharedStore::test_default();
+        store.state.is_subagent = true;
+
+        let args = r#"{"prompt":"do something","agent":"any"}"#;
+        let result =
+            dispatch_tool("task", "t1".into(), args, &mut store, &silent())
+                .await
+                .unwrap();
+        assert!(result);
+
+        let last = store.context.history.last().unwrap();
+        assert!(last
+            .content
+            .as_ref()
+            .unwrap()
+            .contains("not available here"));
+    }
+
+    #[test]
+    fn test_all_tools_excludes_task_for_subagent() {
+        let parent_tools = all_tools(false);
+        let sub_tools = all_tools(true);
+
+        assert!(parent_tools.iter().any(|t| t.function.name == "task"));
+        assert!(!sub_tools.iter().any(|t| t.function.name == "task"));
+        // Both have base tools
+        assert!(parent_tools.iter().any(|t| t.function.name == "bash"));
+        assert!(sub_tools.iter().any(|t| t.function.name == "bash"));
+    }
+
+    fn silent() -> Arc<dyn Channel> {
+        Arc::new(crate::frontend::SilentChannel)
     }
 }
