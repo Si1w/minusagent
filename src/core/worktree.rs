@@ -293,7 +293,9 @@ mod tests {
             .output()
             .unwrap();
         Command::new("git")
-            .args(["commit", "--allow-empty", "-m", "init"])
+            .args(["-c", "user.name=test", "-c", "user.email=test@test"])
+            .arg("commit")
+            .args(["--allow-empty", "-m", "init"])
             .current_dir(dir.path())
             .output()
             .unwrap();
