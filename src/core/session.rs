@@ -10,6 +10,7 @@ use crate::core::llm::LLMCall;
 use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore};
 use crate::frontend::{Channel, SilentChannel};
+use crate::core::team::TeammateStatus;
 use crate::intelligence::memory::MemoryWrite;
 use crate::resilience::profile::ProfileManager;
 use crate::resilience::runner::ResilienceRunner;
@@ -411,6 +412,13 @@ impl Session {
                          \x20 /remember <name> <txt>  Save memory\n\
                          \x20 /<skill> [args]         Invoke skill\n\
                          \n\
+                         Team\n\
+                         \x20 /team                    Show team roster\n\
+                         \x20 /inbox                   Check lead inbox\n\
+                         \x20 /tasks                   Show task board\n\
+                         \x20 /worktrees              List worktrees\n\
+                         \x20 /events                 Worktree event log\n\
+                         \n\
                          Resilience\n\
                          \x20 /profiles               Show API key profiles\n\
                          \x20 /lanes                   Show lane stats\n\
@@ -575,6 +583,93 @@ impl Session {
                     channel.send(&output).await;
                 }
             }
+            "/team" => match &self.store.state.team {
+                Some(team) => {
+                    let members = team.list();
+                    if members.is_empty() {
+                        channel.send("No teammates.").await;
+                    } else {
+                        let mut output = String::from("Team:\n");
+                        for m in &members {
+                            let status = match m.status {
+                                TeammateStatus::Working => {
+                                    "working"
+                                }
+                                TeammateStatus::Idle => "idle",
+                                TeammateStatus::Shutdown => {
+                                    "shutdown"
+                                }
+                            };
+                            output.push_str(&format!(
+                                "  {} [{}] role={}\n",
+                                m.name, status, m.role,
+                            ));
+                        }
+                        let requests = team.list_requests();
+                        if !requests.is_empty() {
+                            output.push_str(&requests);
+                        }
+                        channel.send(&output).await;
+                    }
+                }
+                None => {
+                    channel
+                        .send(
+                            "Team not available (set WORKSPACE_DIR)",
+                        )
+                        .await;
+                }
+            },
+            "/tasks" => match &self.store.state.tasks {
+                Some(mgr) => match mgr.list_formatted() {
+                    Ok(output) => {
+                        channel.send(&output).await;
+                    }
+                    Err(e) => {
+                        channel
+                            .send(&format!("Error: {e}"))
+                            .await;
+                    }
+                },
+                None => {
+                    channel
+                        .send("Task system not available")
+                        .await;
+                }
+            },
+            "/worktrees" => match &self.store.state.worktrees {
+                Some(wt) => {
+                    channel.send(&wt.list_formatted()).await;
+                }
+                None => {
+                    channel
+                        .send("Worktree system not available")
+                        .await;
+                }
+            },
+            "/events" => match &self.store.state.worktrees {
+                Some(wt) => {
+                    channel.send(&wt.events()).await;
+                }
+                None => {
+                    channel
+                        .send("Worktree system not available")
+                        .await;
+                }
+            },
+            "/inbox" => match &self.store.state.team {
+                Some(team) => {
+                    let result = team.read_inbox("lead");
+                    channel.send(&result).await;
+                }
+                None => {
+                    channel
+                        .send(
+                            "Team not available (set WORKSPACE_DIR)",
+                        )
+                        .await;
+                }
+            },
             "/remember" => {
                 let rem_parts: Vec<&str> =
                     arg.splitn(2, ' ').collect();

@@ -32,6 +32,8 @@ pub struct Task {
     pub blocks: Vec<usize>,
     #[serde(default)]
     pub owner: String,
+    #[serde(default)]
+    pub worktree: String,
 }
 
 /// File-based task graph manager
@@ -66,6 +68,7 @@ impl TaskManager {
             blocked_by: Vec::new(),
             blocks: Vec::new(),
             owner: String::new(),
+            worktree: String::new(),
         };
         self.save(&task)?;
         Ok(serde_json::to_string_pretty(&task)?)
@@ -191,6 +194,114 @@ impl TaskManager {
             .map_err(|_| anyhow::anyhow!("Task {id} not found"))?;
         let task: Task = serde_json::from_str(&content)?;
         Ok(task)
+    }
+
+    /// Bind a worktree to a task
+    ///
+    /// Also advances status from `Pending` to `InProgress`.
+    pub fn bind_worktree(
+        &self,
+        task_id: usize,
+        worktree: &str,
+    ) -> Result<()> {
+        let mut task = self.load(task_id)?;
+        task.worktree = worktree.to_string();
+        if task.status == TaskStatus::Pending {
+            task.status = TaskStatus::InProgress;
+        }
+        self.save(&task)?;
+        Ok(())
+    }
+
+    /// Remove worktree binding from a task
+    pub fn unbind_worktree(&self, task_id: usize) -> Result<()> {
+        let mut task = self.load(task_id)?;
+        task.worktree = String::new();
+        self.save(&task)?;
+        Ok(())
+    }
+
+    /// List unclaimed tasks (pending, no owner, not blocked)
+    pub fn scan_unclaimed(&self) -> Result<Vec<Task>> {
+        let tasks = self.list()?;
+        Ok(tasks
+            .into_iter()
+            .filter(|t| {
+                t.status == TaskStatus::Pending
+                    && t.owner.is_empty()
+                    && t.blocked_by.is_empty()
+            })
+            .collect())
+    }
+
+    /// Atomically claim an unclaimed task
+    ///
+    /// Sets the owner and changes status to `InProgress`.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if the task is not pending, already owned,
+    /// or blocked.
+    pub fn claim(
+        &self,
+        task_id: usize,
+        owner: &str,
+    ) -> Result<String> {
+        let mut task = self.load(task_id)?;
+        if task.status != TaskStatus::Pending {
+            return Err(anyhow::anyhow!(
+                "Task {task_id} is not pending"
+            ));
+        }
+        if !task.owner.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Task {task_id} already owned by '{}'",
+                task.owner
+            ));
+        }
+        if !task.blocked_by.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Task {task_id} is blocked"
+            ));
+        }
+        task.owner = owner.to_string();
+        task.status = TaskStatus::InProgress;
+        self.save(&task)?;
+        Ok(serde_json::to_string_pretty(&task)?)
+    }
+
+    /// Format all tasks for display with owner info
+    pub fn list_formatted(&self) -> Result<String> {
+        let tasks = self.list()?;
+        if tasks.is_empty() {
+            return Ok("No tasks.".into());
+        }
+        let mut output = String::from("Tasks:\n");
+        for t in &tasks {
+            let status = match t.status {
+                TaskStatus::Pending => "pending",
+                TaskStatus::InProgress => "in_progress",
+                TaskStatus::Completed => "completed",
+            };
+            let owner = if t.owner.is_empty() {
+                "unassigned"
+            } else {
+                &t.owner
+            };
+            let mut line = format!(
+                "  #{} [{}] owner={} {}",
+                t.id, status, owner, t.subject
+            );
+            if !t.blocked_by.is_empty() {
+                line.push_str(&format!(
+                    " blocked_by={:?}",
+                    t.blocked_by
+                ));
+            }
+            line.push('\n');
+            output.push_str(&line);
+        }
+        Ok(output)
     }
 
     /// Remove `completed_id` from all tasks' `blockedBy` lists
@@ -547,6 +658,77 @@ mod tests {
 
         let t2: Task = serde_json::from_str(&mgr.get(2).unwrap()).unwrap();
         assert_eq!(t2.blocked_by.len(), 1);
+    }
+
+    // ── Autonomous Tests ────────────────────────────────────
+
+    #[test]
+    fn test_scan_unclaimed() {
+        let (_dir, mgr) = test_manager();
+        mgr.create("Free task", "").unwrap();
+        mgr.create("Blocked task", "").unwrap();
+        mgr.update(2, None, Some(vec![1]), None).unwrap();
+
+        let unclaimed = mgr.scan_unclaimed().unwrap();
+        assert_eq!(unclaimed.len(), 1);
+        assert_eq!(unclaimed[0].subject, "Free task");
+    }
+
+    #[test]
+    fn test_scan_unclaimed_skips_owned() {
+        let (_dir, mgr) = test_manager();
+        mgr.create("Task A", "").unwrap();
+        mgr.claim(1, "alice").unwrap();
+
+        let unclaimed = mgr.scan_unclaimed().unwrap();
+        assert!(unclaimed.is_empty());
+    }
+
+    #[test]
+    fn test_claim_success() {
+        let (_dir, mgr) = test_manager();
+        mgr.create("Task 1", "").unwrap();
+
+        let json = mgr.claim(1, "bob").unwrap();
+        let task: Task = serde_json::from_str(&json).unwrap();
+        assert_eq!(task.owner, "bob");
+        assert_eq!(task.status, TaskStatus::InProgress);
+    }
+
+    #[test]
+    fn test_claim_already_owned() {
+        let (_dir, mgr) = test_manager();
+        mgr.create("Task 1", "").unwrap();
+        mgr.claim(1, "alice").unwrap();
+
+        let err = mgr.claim(1, "bob");
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("not pending"));
+    }
+
+    #[test]
+    fn test_claim_blocked() {
+        let (_dir, mgr) = test_manager();
+        mgr.create("Task 1", "").unwrap();
+        mgr.create("Task 2", "").unwrap();
+        mgr.update(2, None, Some(vec![1]), None).unwrap();
+
+        let err = mgr.claim(2, "alice");
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("blocked"));
+    }
+
+    #[test]
+    fn test_list_formatted() {
+        let (_dir, mgr) = test_manager();
+        mgr.create("Task A", "").unwrap();
+        mgr.create("Task B", "").unwrap();
+        mgr.claim(1, "alice").unwrap();
+
+        let output = mgr.list_formatted().unwrap();
+        assert!(output.contains("#1"));
+        assert!(output.contains("owner=alice"));
+        assert!(output.contains("owner=unassigned"));
     }
 
     // ── Background Tests ────────────────────────────────────

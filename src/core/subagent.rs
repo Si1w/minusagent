@@ -82,6 +82,10 @@ pub fn run_subagent(
                 agents,
                 tasks,
                 background: BackgroundManager::new(),
+                team: None,
+                team_name: None,
+                worktrees: None,
+                idle_requested: false,
             },
         };
 
