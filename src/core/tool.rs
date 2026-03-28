@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -10,7 +10,10 @@ use tokio::time::Duration;
 
 use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore};
+use crate::core::subagent::run_subagent;
+use crate::core::todo::{TodoItem, TodoWrite};
 use crate::frontend::Channel;
+use crate::intelligence::manager::normalize_agent_id;
 
 const BASH_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -271,6 +274,47 @@ pub fn write_file_tool() -> ToolDefinition {
     }
 }
 
+pub fn todo_tool() -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: "todo".into(),
+            description: "Update the task plan. Use this to track progress on multi-step \
+                          tasks. Only one task can be in_progress at a time."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {
+                                    "type": "integer",
+                                    "description": "Unique task ID."
+                                },
+                                "text": {
+                                    "type": "string",
+                                    "description": "Task description."
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"],
+                                    "description": "Task status."
+                                }
+                            },
+                            "required": ["id", "text", "status"]
+                        },
+                        "description": "Full list of todo items. Replaces all existing items."
+                    }
+                },
+                "required": ["items"]
+            }),
+        },
+    }
+}
+
 pub fn edit_file_tool() -> ToolDefinition {
     ToolDefinition {
         r#type: "function".into(),
@@ -299,9 +343,47 @@ pub fn edit_file_tool() -> ToolDefinition {
     }
 }
 
+/// Task tool: spawn an agent with isolated context (parent-only)
+pub fn task_tool() -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: "task".into(),
+            description: "Spawn an agent with fresh context to handle a \
+                          subtask. The agent runs in isolation and only \
+                          the final summary is returned."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "The task description."
+                    },
+                    "agent": {
+                        "type": "string",
+                        "description": "Agent ID to handle the task."
+                    }
+                },
+                "required": ["prompt", "agent"]
+            }),
+        },
+    }
+}
+
 /// All built-in tool definitions for LLM registration
-pub fn all_tools() -> Vec<ToolDefinition> {
-    vec![bash_tool(), read_file_tool(), write_file_tool(), edit_file_tool()]
+pub fn all_tools(is_subagent: bool) -> Vec<ToolDefinition> {
+    let mut tools = vec![
+        bash_tool(),
+        read_file_tool(),
+        write_file_tool(),
+        edit_file_tool(),
+        todo_tool(),
+    ];
+    if !is_subagent {
+        tools.push(task_tool());
+    }
+    tools
 }
 
 /// Dispatch a tool call by name
@@ -391,6 +473,75 @@ pub async fn dispatch_tool(
             };
             node.run(store).await?;
         }
+        "todo" => {
+            let items: Vec<TodoItem> =
+                serde_json::from_value(args["items"].clone())
+                    .unwrap_or_default();
+            let node = TodoWrite {
+                call_id: call_id.clone(),
+                items,
+            };
+            if let Err(e) = node.run(store).await {
+                // Return validation errors as tool result so LLM can fix
+                push_tool_result(store, &call_id, format!("Error: {e}"));
+            }
+        }
+        "task" => {
+            if store.state.is_subagent {
+                push_tool_result(
+                    store,
+                    &call_id,
+                    "Error: task tool is not available here".into(),
+                );
+            } else {
+                let prompt = args["prompt"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let agent_id = normalize_agent_id(
+                    args["agent"].as_str().unwrap_or_default(),
+                );
+                let agent_config = store.state.agents.get(&agent_id);
+                match agent_config {
+                    Some(config) => {
+                        let ws_dir = if config.workspace_dir.is_empty() {
+                            None
+                        } else {
+                            Some(PathBuf::from(&config.workspace_dir))
+                        };
+                        let llm_config = store.state.config.llm.clone();
+                        let summary = run_subagent(
+                            prompt,
+                            config.system_prompt.clone(),
+                            llm_config,
+                            ws_dir,
+                            agent_id,
+                            store.state.agents.clone(),
+                        )
+                        .await?;
+                        push_tool_result(store, &call_id, summary);
+                    }
+                    None => {
+                        let available: Vec<String> = store
+                            .state
+                            .agents
+                            .list()
+                            .iter()
+                            .map(|a| a.id.clone())
+                            .collect();
+                        push_tool_result(
+                            store,
+                            &call_id,
+                            format!(
+                                "Error: unknown agent '{}'. Available: {}",
+                                agent_id,
+                                available.join(", ")
+                            ),
+                        );
+                    }
+                }
+            }
+        }
         _ => return Ok(false),
     }
 
@@ -399,7 +550,7 @@ pub async fn dispatch_tool(
 
 // Helpers
 
-fn push_tool_result(store: &mut SharedStore, call_id: &str, content: String) {
+pub(crate) fn push_tool_result(store: &mut SharedStore, call_id: &str, content: String) {
     store.context.history.push(Message {
         role: Role::Tool,
         content: Some(content),
@@ -438,6 +589,8 @@ fn safe_path(raw: &str) -> Result<String> {
 mod tests {
     use super::*;
     use crate::core::store::{Config, Context, LLMConfig, SystemState};
+    use crate::core::todo::TodoManager;
+    use crate::intelligence::manager::SharedAgents;
 
     fn empty_store() -> SharedStore {
         SharedStore {
@@ -455,6 +608,9 @@ mod tests {
                     },
                 },
                 intelligence: None,
+                todo: TodoManager::new(),
+                is_subagent: false,
+                agents: SharedAgents::empty(),
             },
         }
     }

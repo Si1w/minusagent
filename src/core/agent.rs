@@ -51,7 +51,11 @@ impl Agent {
 
             match response.tool_calls {
                 Some(tool_calls) => {
-                    for tc in tool_calls {
+                    let mut had_todo = false;
+                    for tc in &tool_calls {
+                        if tc.name == "todo" {
+                            had_todo = true;
+                        }
                         let handled = dispatch_tool(
                             &tc.name,
                             tc.id.clone(),
@@ -69,8 +73,31 @@ impl Agent {
                                     tc.name
                                 )),
                                 tool_calls: None,
-                                tool_call_id: Some(tc.id),
+                                tool_call_id: Some(tc.id.clone()),
                             });
+                        }
+                    }
+
+                    // Nag reminder: nudge LLM to update todos
+                    if had_todo {
+                        store.state.todo.rounds_since_update = 0;
+                    } else {
+                        store.state.todo.rounds_since_update += 1;
+                    }
+                    if store.state.todo.rounds_since_update >= 3
+                        && !store.state.todo.items.is_empty()
+                    {
+                        if let Some(last) =
+                            store.context.history.last_mut()
+                        {
+                            if last.role == Role::Tool {
+                                if let Some(content) = &mut last.content {
+                                    content.push_str(
+                                        "\n\n<reminder>Update your \
+                                         todos.</reminder>",
+                                    );
+                                }
+                            }
                         }
                     }
                 }

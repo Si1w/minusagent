@@ -229,6 +229,8 @@ impl ResilienceRunner {
 mod tests {
     use super::*;
     use crate::core::store::{Config, Context, LLMConfig, Message, Role, SystemState};
+    use crate::core::todo::TodoManager;
+    use crate::intelligence::manager::SharedAgents;
     use crate::resilience::profile::AuthProfile;
 
     fn test_store() -> SharedStore {
@@ -254,6 +256,9 @@ mod tests {
                     },
                 },
                 intelligence: None,
+                todo: TodoManager::new(),
+                is_subagent: false,
+                agents: SharedAgents::empty(),
             },
         }
     }
@@ -327,6 +332,9 @@ mod tests {
                     },
                 },
                 intelligence: None,
+                todo: TodoManager::new(),
+                is_subagent: false,
+                agents: SharedAgents::empty(),
             },
         };
 

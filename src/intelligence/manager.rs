@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, RwLock};
 
 use regex::Regex;
 
@@ -150,6 +150,40 @@ impl AgentManager {
                 workspace_dir,
             });
         }
+    }
+}
+
+/// Read-only handle to the agent registry
+///
+/// Wraps `Arc<RwLock<AgentManager>>` and exposes only read operations.
+/// Shared between router (owns the manager) and sessions (read-only).
+#[derive(Clone)]
+pub struct SharedAgents(Arc<RwLock<AgentManager>>);
+
+impl SharedAgents {
+    /// Create from an `Arc<RwLock<AgentManager>>`
+    pub fn new(mgr: Arc<RwLock<AgentManager>>) -> Self {
+        Self(mgr)
+    }
+
+    /// Create an empty registry (for tests and standalone contexts)
+    pub fn empty() -> Self {
+        Self(Arc::new(RwLock::new(AgentManager::new(String::new()))))
+    }
+
+    /// Look up an agent by ID
+    pub fn get(&self, agent_id: &str) -> Option<AgentConfig> {
+        self.0.read().unwrap().get(agent_id).cloned()
+    }
+
+    /// List all registered agents
+    pub fn list(&self) -> Vec<AgentConfig> {
+        self.0.read().unwrap().list().into_iter().cloned().collect()
+    }
+
+    /// Resolve the effective model for an agent
+    pub fn effective_model(&self, agent_id: &str) -> String {
+        self.0.read().unwrap().effective_model(agent_id)
     }
 }
 

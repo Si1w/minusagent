@@ -12,9 +12,10 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::core::session::Session;
 use crate::core::store::{Config, Context, LLMConfig, SharedStore, SystemState};
+use crate::core::todo::TodoManager;
 use crate::frontend::{Channel, UserMessage};
 use crate::intelligence::Intelligence;
-use crate::intelligence::manager::{AgentConfig, normalize_agent_id};
+use crate::intelligence::manager::{AgentConfig, SharedAgents, normalize_agent_id};
 use crate::routing::delivery::DeliveryHandle;
 use crate::routing::router::{Binding, BindingRouter, Router};
 use crate::scheduler::LaneLock;
@@ -62,6 +63,7 @@ impl ProviderConfig {
         system_prompt: String,
         model: String,
         intelligence: Option<Intelligence>,
+        agents: SharedAgents,
     ) -> SharedStore {
         SharedStore {
             context: Context {
@@ -78,6 +80,9 @@ impl ProviderConfig {
                     },
                 },
                 intelligence,
+                todo: TodoManager::new(),
+                is_subagent: false,
+                agents,
             },
         }
     }
@@ -218,7 +223,7 @@ impl Gateway {
         agent_override: Option<&str>,
     ) -> Result<DispatchResult> {
         // 1. Resolve routing
-        let (session_key, system_prompt, model, agent_id, channel_name, ws_dir) =
+        let (session_key, system_prompt, model, agent_id, channel_name, ws_dir, shared_agents) =
         {
             let s = self.state.read().await;
             let result = if let Some(ov) = agent_override {
@@ -226,19 +231,21 @@ impl Gateway {
             } else {
                 s.router.resolve(&msg)
             };
-            let agent = s.router.manager().get(&result.agent_id);
+            let agents = s.router.shared_agents();
+            let agent = agents.get(&result.agent_id);
             let prompt = agent
+                .as_ref()
                 .map(|a| a.system_prompt.clone())
                 .unwrap_or_default();
-            let model =
-                s.router.manager().effective_model(&result.agent_id);
+            let model = agents.effective_model(&result.agent_id);
             let ch = msg.channel.clone();
             let ws: Option<PathBuf> = agent
+                .as_ref()
                 .map(|a| a.workspace_dir.clone())
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from)
                 .or(self.provider.workspace_dir.clone());
-            (result.session_key, prompt, model, result.agent_id, ch, ws)
+            (result.session_key, prompt, model, result.agent_id, ch, ws, agents)
         };
 
         // 2. Track session
@@ -280,6 +287,7 @@ impl Gateway {
                     initial_prompt,
                     model.clone(),
                     intelligence,
+                    shared_agents.clone(),
                 );
 
                 let lane_lock: LaneLock =
@@ -637,16 +645,15 @@ async fn m_agents_list(
     gateway: &Arc<Gateway>,
 ) -> std::result::Result<Value, String> {
     let s = gateway.state().read().await;
-    let agents: Vec<Value> = s
-        .router
-        .manager()
-        .list()
+    let shared = s.router.shared_agents();
+    let list = shared.list();
+    let agents: Vec<Value> = list
         .iter()
         .map(|a| {
             json!({
                 "id": a.id,
                 "name": a.name,
-                "model": s.router.manager().effective_model(&a.id),
+                "model": shared.effective_model(&a.id),
                 "dm_scope": a.dm_scope,
             })
         })
@@ -715,7 +722,7 @@ async fn m_status(
 ) -> std::result::Result<Value, String> {
     let s = gateway.state().read().await;
     Ok(json!({
-        "agents": s.router.manager().list().len(),
+        "agents": s.router.shared_agents().list().len(),
         "bindings": s.router.table().list().len(),
         "sessions": s.sessions.len(),
         "uptime_secs": s.start_time.elapsed().as_secs(),

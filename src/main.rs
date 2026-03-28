@@ -31,6 +31,7 @@ async fn main() {
     if let Some(ws) = &provider.workspace_dir {
         mgr.discover_workspace(&ws.join(".agents"));
     }
+    let mgr = std::sync::Arc::new(std::sync::RwLock::new(mgr));
     let mut table = BindingTable::new();
     if let Some(ws) = &provider.workspace_dir {
         table.load_file(&ws.join("routes.json"));

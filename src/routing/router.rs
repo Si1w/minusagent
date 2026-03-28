@@ -1,7 +1,7 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
 use crate::frontend::UserMessage;
-use crate::intelligence::manager::{AgentManager, normalize_agent_id};
+use crate::intelligence::manager::{AgentManager, SharedAgents, normalize_agent_id};
 use crate::routing::delivery::OutboundSinks;
 
 /// Routing decision result
@@ -218,7 +218,7 @@ pub fn build_session_key(
 /// to the correct frontend.
 pub struct BindingRouter {
     table: BindingTable,
-    mgr: AgentManager,
+    mgr: Arc<RwLock<AgentManager>>,
     default_agent_id: String,
     outbound: Arc<OutboundSinks>,
 }
@@ -234,7 +234,7 @@ impl BindingRouter {
     /// * `outbound` - Outbound sink registry for background delivery
     pub fn new(
         table: BindingTable,
-        mgr: AgentManager,
+        mgr: Arc<RwLock<AgentManager>>,
         default_agent_id: &str,
         outbound: Arc<OutboundSinks>,
     ) -> Self {
@@ -257,13 +257,13 @@ impl BindingRouter {
     }
 
     /// Mutable access to the agent manager
-    pub fn manager_mut(&mut self) -> &mut AgentManager {
-        &mut self.mgr
+    pub fn manager_mut(&mut self) -> RwLockWriteGuard<'_, AgentManager> {
+        self.mgr.write().unwrap()
     }
 
-    /// Read access to the agent manager
-    pub fn manager(&self) -> &AgentManager {
-        &self.mgr
+    /// Read-only shared handle to the agent registry
+    pub fn shared_agents(&self) -> SharedAgents {
+        SharedAgents::new(self.mgr.clone())
     }
 
     /// Access to the outbound sink registry
@@ -274,8 +274,8 @@ impl BindingRouter {
 
 impl BindingRouter {
     fn build_result(&self, agent_id: &str, msg: &UserMessage) -> RouteResult {
-        let dm_scope = self
-            .mgr
+        let mgr = self.mgr.read().unwrap();
+        let dm_scope = mgr
             .get(agent_id)
             .map(|a| a.dm_scope.as_str())
             .unwrap_or("per-peer");
@@ -330,6 +330,10 @@ mod tests {
 
     fn test_outbound() -> Arc<OutboundSinks> {
         Arc::new(OutboundSinks::new(Arc::new(BgOutputSink)))
+    }
+
+    fn wrap_mgr(mgr: AgentManager) -> Arc<RwLock<AgentManager>> {
+        Arc::new(RwLock::new(mgr))
     }
 
     fn msg(channel: &str, sender_id: &str) -> UserMessage {
@@ -504,7 +508,7 @@ mod tests {
             priority: 0,
         });
 
-        let router = BindingRouter::new(bt, mgr, "luna", test_outbound());
+        let router = BindingRouter::new(bt, wrap_mgr(mgr), "luna", test_outbound());
 
         let r = router.resolve(&msg("cli", "user1"));
         assert_eq!(r.agent_id, "luna");
@@ -519,7 +523,7 @@ mod tests {
     fn test_binding_router_fallback() {
         let mgr = AgentManager::new("m".into());
         let bt = BindingTable::new();
-        let router = BindingRouter::new(bt, mgr, "mandeven", test_outbound());
+        let router = BindingRouter::new(bt, wrap_mgr(mgr), "mandeven", test_outbound());
 
         let r = router.resolve(&msg("cli", "user1"));
         assert_eq!(r.agent_id, "mandeven");
@@ -538,7 +542,7 @@ mod tests {
             workspace_dir: String::new(),
         });
         let bt = BindingTable::new();
-        let router = BindingRouter::new(bt, mgr, "mandeven", test_outbound());
+        let router = BindingRouter::new(bt, wrap_mgr(mgr), "mandeven", test_outbound());
 
         let r = router.resolve_explicit("sage", &msg("discord", "user1"));
         assert_eq!(r.agent_id, "sage");

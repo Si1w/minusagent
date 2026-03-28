@@ -170,7 +170,7 @@ impl Node for LLMCall {
             });
         }
 
-        let tools = all_tools();
+        let tools = all_tools(store.state.is_subagent);
 
         Ok(LLMRequest {
             url: format!(
@@ -307,7 +307,9 @@ impl Node for LLMCall {
 mod tests {
     use super::*;
     use crate::core::store::{Config, Context, LLMConfig, SystemState};
+    use crate::core::todo::TodoManager;
     use crate::frontend::SilentChannel;
+    use crate::intelligence::manager::SharedAgents;
 
     #[tokio::test]
     #[ignore] // requires LLM_API_KEY
@@ -334,6 +336,9 @@ mod tests {
                     },
                 },
                 intelligence: None,
+                todo: TodoManager::new(),
+                is_subagent: false,
+                agents: SharedAgents::empty(),
             },
         };
 

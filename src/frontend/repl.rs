@@ -72,7 +72,7 @@ pub async fn run(gateway: Arc<Gateway>, cli: Arc<dyn Channel>) {
                     .state()
                     .read()
                     .await;
-                let agents = s.router.manager().list();
+                let agents = s.router.shared_agents().list();
                 if agents.is_empty() {
                     "No agents registered.".to_string()
                 } else {
@@ -127,7 +127,7 @@ pub async fn run(gateway: Arc<Gateway>, cli: Arc<dyn Channel>) {
                     .read()
                     .await
                     .router
-                    .manager()
+                    .shared_agents()
                     .get(&arg)
                     .is_some();
                 if found {
@@ -212,8 +212,9 @@ pub async fn run(gateway: Arc<Gateway>, cli: Arc<dyn Channel>) {
                         .await;
                     let result = s.router.resolve(&test_msg);
                     let agent =
-                        s.router.manager().get(&result.agent_id);
+                        s.router.shared_agents().get(&result.agent_id);
                     let name = agent
+                        .as_ref()
                         .map(|a| a.name.as_str())
                         .unwrap_or("?");
                     format!(
