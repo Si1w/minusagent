@@ -745,4 +745,56 @@ mod tests {
         assert!(result.is_ok());
         std::fs::remove_file("test_safe_path.txt").ok();
     }
+
+    #[tokio::test]
+    async fn test_task_rejects_unknown_agent() {
+        let mut store = empty_store();
+        let args = r#"{"prompt":"do something","agent":"nonexistent"}"#;
+        let result =
+            dispatch_tool("task", "t1".into(), args, &mut store, &silent())
+                .await
+                .unwrap();
+        assert!(result);
+
+        let last = store.context.history.last().unwrap();
+        let content = last.content.as_ref().unwrap();
+        assert!(content.contains("Error: unknown agent"));
+        assert!(content.contains("Available:"));
+    }
+
+    #[tokio::test]
+    async fn test_task_blocked_in_subagent() {
+        let mut store = empty_store();
+        store.state.is_subagent = true;
+
+        let args = r#"{"prompt":"do something","agent":"any"}"#;
+        let result =
+            dispatch_tool("task", "t1".into(), args, &mut store, &silent())
+                .await
+                .unwrap();
+        assert!(result);
+
+        let last = store.context.history.last().unwrap();
+        assert!(last
+            .content
+            .as_ref()
+            .unwrap()
+            .contains("not available here"));
+    }
+
+    #[test]
+    fn test_all_tools_excludes_task_for_subagent() {
+        let parent_tools = all_tools(false);
+        let sub_tools = all_tools(true);
+
+        assert!(parent_tools.iter().any(|t| t.function.name == "task"));
+        assert!(!sub_tools.iter().any(|t| t.function.name == "task"));
+        // Both have base tools
+        assert!(parent_tools.iter().any(|t| t.function.name == "bash"));
+        assert!(sub_tools.iter().any(|t| t.function.name == "bash"));
+    }
+
+    fn silent() -> Arc<dyn Channel> {
+        Arc::new(crate::frontend::SilentChannel)
+    }
 }

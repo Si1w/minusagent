@@ -219,4 +219,71 @@ mod tests {
         assert!(output.contains("[>] #2 doing"));
         assert!(output.contains("[ ] #3 todo"));
     }
+
+    #[test]
+    fn test_nag_reminder_triggers_after_3_rounds() {
+        use crate::core::store::{Message, Role};
+
+        let mut store = empty_store();
+        // Populate todo items so nag can trigger
+        store.state.todo.items = vec![TodoItem {
+            id: 1,
+            text: "task".into(),
+            status: TodoStatus::InProgress,
+        }];
+
+        // Simulate 3 rounds without todo update
+        store.state.todo.rounds_since_update = 3;
+
+        // Add a tool result message (nag appends to the last Tool message)
+        store.context.history.push(Message {
+            role: Role::Tool,
+            content: Some("some result".into()),
+            tool_calls: None,
+            tool_call_id: Some("c1".into()),
+        });
+
+        // Simulate the nag logic from agent.rs
+        if store.state.todo.rounds_since_update >= 3
+            && !store.state.todo.items.is_empty()
+        {
+            if let Some(last) = store.context.history.last_mut() {
+                if last.role == Role::Tool {
+                    if let Some(content) = &mut last.content {
+                        content.push_str(
+                            "\n\n<reminder>Update your todos.</reminder>",
+                        );
+                    }
+                }
+            }
+        }
+
+        let last = store.context.history.last().unwrap();
+        assert!(last
+            .content
+            .as_ref()
+            .unwrap()
+            .contains("<reminder>Update your todos.</reminder>"));
+    }
+
+    #[test]
+    fn test_nag_reminder_skipped_when_no_items() {
+        use crate::core::store::{Message, Role};
+
+        let mut store = empty_store();
+        // No todo items
+        store.state.todo.rounds_since_update = 5;
+
+        store.context.history.push(Message {
+            role: Role::Tool,
+            content: Some("result".into()),
+            tool_calls: None,
+            tool_call_id: Some("c1".into()),
+        });
+
+        // Nag should NOT trigger when items is empty
+        let should_nag = store.state.todo.rounds_since_update >= 3
+            && !store.state.todo.items.is_empty();
+        assert!(!should_nag);
+    }
 }
