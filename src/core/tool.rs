@@ -11,7 +11,7 @@ use tokio::time::Duration;
 use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore};
 use crate::core::subagent::run_subagent;
-use crate::core::task::TaskStatus;
+use crate::core::task::{BackgroundStatus, TaskStatus};
 use crate::core::todo::{TodoItem, TodoWrite};
 use crate::frontend::Channel;
 use crate::intelligence::manager::normalize_agent_id;
@@ -445,6 +445,53 @@ pub fn task_get_tool() -> ToolDefinition {
     }
 }
 
+/// Run a shell command in the background
+pub fn background_run_tool() -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: "background_run".into(),
+            description: "Run a shell command in the background. \
+                          Returns immediately with a task ID. \
+                          Results are automatically delivered \
+                          before your next response."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute in the background."
+                    }
+                },
+                "required": ["command"]
+            }),
+        },
+    }
+}
+
+/// Check status of background tasks
+pub fn background_check_tool() -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: "background_check".into(),
+            description: "Check status of background tasks. \
+                          Returns all tasks if no task_id given."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "Specific background task ID to check. Omit to list all."
+                    }
+                }
+            }),
+        },
+    }
+}
+
 /// Task tool: spawn an agent with isolated context (parent-only)
 pub fn task_tool() -> ToolDefinition {
     ToolDefinition {
@@ -481,6 +528,8 @@ pub fn all_tools(is_subagent: bool, has_tasks: bool) -> Vec<ToolDefinition> {
         write_file_tool(),
         edit_file_tool(),
         todo_tool(),
+        background_run_tool(),
+        background_check_tool(),
     ];
     if !is_subagent {
         tools.push(task_tool());
@@ -602,6 +651,110 @@ pub async fn dispatch_tool(
             };
             if let Err(e) = node.run(store).await {
                 push_tool_result(store, &call_id, format!("Error: {e}"));
+            }
+        }
+        "background_run" => {
+            let command = args["command"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+
+            let dangerous =
+                ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"];
+            let blocked = dangerous.iter().any(|p| command.contains(p));
+            if blocked {
+                push_tool_result(
+                    store,
+                    &call_id,
+                    "Error: command blocked (dangerous pattern)".into(),
+                );
+            } else if !channel.confirm(&command).await {
+                push_tool_result(
+                    store,
+                    &call_id,
+                    "User denied execution.".into(),
+                );
+            } else {
+                let task_id = store.state.background.run(&command);
+                push_tool_result(
+                    store,
+                    &call_id,
+                    format!(
+                        "Background task {task_id} started: {command}"
+                    ),
+                );
+            }
+        }
+        "background_check" => {
+            let task_id = args.get("task_id").and_then(|v| v.as_str());
+            match task_id {
+                Some(id) => match store.state.background.get(id) {
+                    Some(task) => {
+                        let status = match task.status {
+                            BackgroundStatus::Running => "running",
+                            BackgroundStatus::Completed => "completed",
+                            BackgroundStatus::Failed => "failed",
+                        };
+                        let output = task
+                            .output
+                            .as_deref()
+                            .unwrap_or("(still running)");
+                        push_tool_result(
+                            store,
+                            &call_id,
+                            format!(
+                                "Task {id}: {status}\n\
+                                 Command: {}\n\
+                                 Output:\n{output}",
+                                task.command,
+                            ),
+                        );
+                    }
+                    None => {
+                        push_tool_result(
+                            store,
+                            &call_id,
+                            format!("Error: background task '{id}' not found"),
+                        );
+                    }
+                },
+                None => {
+                    let tasks = store.state.background.list();
+                    if tasks.is_empty() {
+                        push_tool_result(
+                            store,
+                            &call_id,
+                            "No background tasks.".into(),
+                        );
+                    } else {
+                        let lines: Vec<String> = tasks
+                            .iter()
+                            .map(|t| {
+                                let status = match t.status {
+                                    BackgroundStatus::Running => {
+                                        "running"
+                                    }
+                                    BackgroundStatus::Completed => {
+                                        "completed"
+                                    }
+                                    BackgroundStatus::Failed => "failed",
+                                };
+                                format!(
+                                    "  {} [{}] {}",
+                                    t.id, status, t.command,
+                                )
+                            })
+                            .collect();
+                        push_tool_result(
+                            store,
+                            &call_id,
+                            format!(
+                                "Background tasks:\n{}",
+                                lines.join("\n")
+                            ),
+                        );
+                    }
+                }
             }
         }
         "task_create" => {

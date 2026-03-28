@@ -12,7 +12,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::core::session::Session;
 use crate::core::store::{Config, Context, LLMConfig, SharedStore, SystemState};
-use crate::core::task::TaskManager;
+use crate::core::task::{BackgroundManager, TaskManager};
 use crate::core::todo::TodoManager;
 use crate::frontend::{Channel, UserMessage};
 use crate::intelligence::Intelligence;
@@ -90,6 +90,7 @@ impl ProviderConfig {
                 is_subagent: false,
                 agents,
                 tasks,
+                background: BackgroundManager::new(),
             },
         }
     }

@@ -229,6 +229,7 @@ impl ResilienceRunner {
 mod tests {
     use super::*;
     use crate::core::store::{Config, Context, LLMConfig, Message, Role, SystemState};
+    use crate::core::task::BackgroundManager;
     use crate::core::todo::TodoManager;
     use crate::intelligence::manager::SharedAgents;
     use crate::resilience::profile::AuthProfile;
@@ -260,6 +261,7 @@ mod tests {
                 is_subagent: false,
                 agents: SharedAgents::empty(),
                 tasks: None,
+                background: BackgroundManager::new(),
             },
         }
     }
@@ -337,6 +339,7 @@ mod tests {
                 is_subagent: false,
                 agents: SharedAgents::empty(),
                 tasks: None,
+                background: BackgroundManager::new(),
             },
         };
 

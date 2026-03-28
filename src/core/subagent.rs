@@ -9,7 +9,7 @@ use crate::core::agent::{CotOptions, cot_loop};
 use crate::core::store::{
     Config, Context, LLMConfig, Message, Role, SharedStore, SystemState,
 };
-use crate::core::task::TaskManager;
+use crate::core::task::{BackgroundManager, TaskManager};
 use crate::core::todo::TodoManager;
 use crate::frontend::{Channel, SilentChannel};
 use crate::intelligence::Intelligence;
@@ -81,6 +81,7 @@ pub fn run_subagent(
                 is_subagent: true,
                 agents,
                 tasks,
+                background: BackgroundManager::new(),
             },
         };
 
