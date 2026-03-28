@@ -98,6 +98,7 @@ pub async fn run_single_turn(
             todo: TodoManager::new(),
             is_subagent: false,
             agents: crate::intelligence::manager::SharedAgents::empty(),
+            tasks: None,
         },
     };
 

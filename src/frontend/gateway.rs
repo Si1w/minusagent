@@ -12,6 +12,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::core::session::Session;
 use crate::core::store::{Config, Context, LLMConfig, SharedStore, SystemState};
+use crate::core::task::TaskManager;
 use crate::core::todo::TodoManager;
 use crate::frontend::{Channel, UserMessage};
 use crate::intelligence::Intelligence;
@@ -64,7 +65,12 @@ impl ProviderConfig {
         model: String,
         intelligence: Option<Intelligence>,
         agents: SharedAgents,
+        workspace_dir: Option<&PathBuf>,
     ) -> SharedStore {
+        let tasks = workspace_dir
+            .map(|ws| TaskManager::new(ws.join(".tasks")))
+            .and_then(|r| r.ok());
+
         SharedStore {
             context: Context {
                 system_prompt,
@@ -83,6 +89,7 @@ impl ProviderConfig {
                 todo: TodoManager::new(),
                 is_subagent: false,
                 agents,
+                tasks,
             },
         }
     }
@@ -288,6 +295,7 @@ impl Gateway {
                     model.clone(),
                     intelligence,
                     shared_agents.clone(),
+                    ws_dir.as_ref(),
                 );
 
                 let lane_lock: LaneLock =
