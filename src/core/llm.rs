@@ -170,7 +170,10 @@ impl Node for LLMCall {
             });
         }
 
-        let tools = all_tools(store.state.is_subagent);
+        let tools = all_tools(
+            store.state.is_subagent,
+            store.state.tasks.is_some(),
+        );
 
         Ok(LLMRequest {
             url: format!(
@@ -339,6 +342,7 @@ mod tests {
                 todo: TodoManager::new(),
                 is_subagent: false,
                 agents: SharedAgents::empty(),
+                tasks: None,
             },
         };
 

@@ -259,6 +259,7 @@ mod tests {
                 todo: TodoManager::new(),
                 is_subagent: false,
                 agents: SharedAgents::empty(),
+                tasks: None,
             },
         }
     }
@@ -335,6 +336,7 @@ mod tests {
                 todo: TodoManager::new(),
                 is_subagent: false,
                 agents: SharedAgents::empty(),
+                tasks: None,
             },
         };
 

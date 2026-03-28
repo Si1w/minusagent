@@ -9,6 +9,7 @@ use crate::core::agent::{CotOptions, cot_loop};
 use crate::core::store::{
     Config, Context, LLMConfig, Message, Role, SharedStore, SystemState,
 };
+use crate::core::task::TaskManager;
 use crate::core::todo::TodoManager;
 use crate::frontend::{Channel, SilentChannel};
 use crate::intelligence::Intelligence;
@@ -33,6 +34,7 @@ const MAX_TURNS: usize = 30;
 /// * `workspace_dir` - Agent workspace for Intelligence loading
 /// * `agent_id` - Agent identifier for runtime context
 /// * `agents` - Shared agent registry (passed through for nested dispatch)
+/// * `tasks` - Shared task graph (passed through for task operations)
 ///
 /// # Returns
 ///
@@ -44,6 +46,7 @@ pub fn run_subagent(
     workspace_dir: Option<PathBuf>,
     agent_id: String,
     agents: SharedAgents,
+    tasks: Option<TaskManager>,
 ) -> Pin<Box<dyn Future<Output = Result<String>> + Send>> {
     Box::pin(async move {
         // Build Intelligence from workspace if available
@@ -77,6 +80,7 @@ pub fn run_subagent(
                 todo: TodoManager::new(),
                 is_subagent: true,
                 agents,
+                tasks,
             },
         };
 

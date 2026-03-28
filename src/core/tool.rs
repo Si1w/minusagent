@@ -11,6 +11,7 @@ use tokio::time::Duration;
 use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore};
 use crate::core::subagent::run_subagent;
+use crate::core::task::TaskStatus;
 use crate::core::todo::{TodoItem, TodoWrite};
 use crate::frontend::Channel;
 use crate::intelligence::manager::normalize_agent_id;
@@ -343,6 +344,107 @@ pub fn edit_file_tool() -> ToolDefinition {
     }
 }
 
+/// Create a persistent task in the task graph
+pub fn task_create_tool() -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: "task_create".into(),
+            description: "Create a new persistent task in the task graph.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "subject": {
+                        "type": "string",
+                        "description": "Short task title."
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Detailed task description."
+                    }
+                },
+                "required": ["subject"]
+            }),
+        },
+    }
+}
+
+/// Update a task's status or dependencies
+pub fn task_update_tool() -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: "task_update".into(),
+            description: "Update a task's status or dependencies. \
+                          Setting status to 'completed' auto-unblocks \
+                          dependent tasks."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "integer",
+                        "description": "Task ID to update."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "in_progress", "completed"],
+                        "description": "New task status."
+                    },
+                    "blocked_by": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Task IDs this task depends on (adds to existing)."
+                    },
+                    "blocks": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Task IDs this task blocks (adds to existing)."
+                    }
+                },
+                "required": ["task_id"]
+            }),
+        },
+    }
+}
+
+/// List all tasks in the task graph
+pub fn task_list_tool() -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: "task_list".into(),
+            description: "List all tasks with their status and dependencies."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+    }
+}
+
+/// Get a specific task by ID
+pub fn task_get_tool() -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: "task_get".into(),
+            description: "Get details of a specific task by ID.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "integer",
+                        "description": "Task ID to retrieve."
+                    }
+                },
+                "required": ["task_id"]
+            }),
+        },
+    }
+}
+
 /// Task tool: spawn an agent with isolated context (parent-only)
 pub fn task_tool() -> ToolDefinition {
     ToolDefinition {
@@ -372,7 +474,7 @@ pub fn task_tool() -> ToolDefinition {
 }
 
 /// All built-in tool definitions for LLM registration
-pub fn all_tools(is_subagent: bool) -> Vec<ToolDefinition> {
+pub fn all_tools(is_subagent: bool, has_tasks: bool) -> Vec<ToolDefinition> {
     let mut tools = vec![
         bash_tool(),
         read_file_tool(),
@@ -382,6 +484,12 @@ pub fn all_tools(is_subagent: bool) -> Vec<ToolDefinition> {
     ];
     if !is_subagent {
         tools.push(task_tool());
+    }
+    if has_tasks {
+        tools.push(task_create_tool());
+        tools.push(task_update_tool());
+        tools.push(task_list_tool());
+        tools.push(task_get_tool());
     }
     tools
 }
@@ -496,6 +604,118 @@ pub async fn dispatch_tool(
                 push_tool_result(store, &call_id, format!("Error: {e}"));
             }
         }
+        "task_create" => {
+            match &store.state.tasks {
+                Some(mgr) => {
+                    let subject = args["subject"]
+                        .as_str()
+                        .unwrap_or_default();
+                    let description = args["description"]
+                        .as_str()
+                        .unwrap_or_default();
+                    match mgr.create(subject, description) {
+                        Ok(json) => push_tool_result(store, &call_id, json),
+                        Err(e) => push_tool_result(
+                            store,
+                            &call_id,
+                            format!("Error: {e}"),
+                        ),
+                    }
+                }
+                None => {
+                    push_tool_result(
+                        store,
+                        &call_id,
+                        "Error: task system not available".into(),
+                    );
+                }
+            }
+        }
+        "task_update" => {
+            match &store.state.tasks {
+                Some(mgr) => {
+                    let task_id = args["task_id"].as_u64().unwrap_or(0) as usize;
+                    let status = args["status"].as_str().and_then(|s| {
+                        serde_json::from_value::<TaskStatus>(
+                            serde_json::Value::String(s.to_string()),
+                        )
+                        .ok()
+                    });
+                    let blocked_by: Option<Vec<usize>> = args
+                        .get("blocked_by")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_u64().map(|n| n as usize))
+                                .collect()
+                        });
+                    let blocks: Option<Vec<usize>> = args
+                        .get("blocks")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_u64().map(|n| n as usize))
+                                .collect()
+                        });
+                    match mgr.update(task_id, status, blocked_by, blocks) {
+                        Ok(json) => push_tool_result(store, &call_id, json),
+                        Err(e) => push_tool_result(
+                            store,
+                            &call_id,
+                            format!("Error: {e}"),
+                        ),
+                    }
+                }
+                None => {
+                    push_tool_result(
+                        store,
+                        &call_id,
+                        "Error: task system not available".into(),
+                    );
+                }
+            }
+        }
+        "task_list" => {
+            match &store.state.tasks {
+                Some(mgr) => match mgr.list_all() {
+                    Ok(json) => push_tool_result(store, &call_id, json),
+                    Err(e) => push_tool_result(
+                        store,
+                        &call_id,
+                        format!("Error: {e}"),
+                    ),
+                },
+                None => {
+                    push_tool_result(
+                        store,
+                        &call_id,
+                        "Error: task system not available".into(),
+                    );
+                }
+            }
+        }
+        "task_get" => {
+            match &store.state.tasks {
+                Some(mgr) => {
+                    let task_id = args["task_id"].as_u64().unwrap_or(0) as usize;
+                    match mgr.get(task_id) {
+                        Ok(json) => push_tool_result(store, &call_id, json),
+                        Err(e) => push_tool_result(
+                            store,
+                            &call_id,
+                            format!("Error: {e}"),
+                        ),
+                    }
+                }
+                None => {
+                    push_tool_result(
+                        store,
+                        &call_id,
+                        "Error: task system not available".into(),
+                    );
+                }
+            }
+        }
         "task" => {
             if store.state.is_subagent {
                 push_tool_result(
@@ -527,6 +747,7 @@ pub async fn dispatch_tool(
                             ws_dir,
                             agent_id,
                             store.state.agents.clone(),
+                            store.state.tasks.clone(),
                         )
                         .await?;
                         push_tool_result(store, &call_id, summary);
@@ -768,14 +989,26 @@ mod tests {
 
     #[test]
     fn test_all_tools_excludes_task_for_subagent() {
-        let parent_tools = all_tools(false);
-        let sub_tools = all_tools(true);
+        let parent_tools = all_tools(false, false);
+        let sub_tools = all_tools(true, false);
 
         assert!(parent_tools.iter().any(|t| t.function.name == "task"));
         assert!(!sub_tools.iter().any(|t| t.function.name == "task"));
         // Both have base tools
         assert!(parent_tools.iter().any(|t| t.function.name == "bash"));
         assert!(sub_tools.iter().any(|t| t.function.name == "bash"));
+    }
+
+    #[test]
+    fn test_all_tools_includes_task_graph_tools() {
+        let without = all_tools(false, false);
+        let with = all_tools(false, true);
+
+        assert!(!without.iter().any(|t| t.function.name == "task_create"));
+        assert!(with.iter().any(|t| t.function.name == "task_create"));
+        assert!(with.iter().any(|t| t.function.name == "task_update"));
+        assert!(with.iter().any(|t| t.function.name == "task_list"));
+        assert!(with.iter().any(|t| t.function.name == "task_get"));
     }
 
     fn silent() -> Arc<dyn Channel> {

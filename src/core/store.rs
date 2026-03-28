@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::core::task::TaskManager;
 use crate::core::todo::TodoManager;
 use crate::intelligence::Intelligence;
 use crate::intelligence::manager::SharedAgents;
@@ -58,6 +59,8 @@ pub struct SystemState {
     pub is_subagent: bool,
     /// Read-only handle to the shared agent registry
     pub agents: SharedAgents,
+    /// Persistent task graph (workspace-level)
+    pub tasks: Option<TaskManager>,
 }
 
 /// Two-layer state container shared across all nodes
@@ -91,6 +94,7 @@ impl SharedStore {
                 todo: TodoManager::new(),
                 is_subagent: false,
                 agents: SharedAgents::empty(),
+                tasks: None,
             },
         }
     }
