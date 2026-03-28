@@ -8,6 +8,115 @@ use crate::core::store::{Message, Role, SharedStore};
 use crate::core::tool::dispatch_tool;
 use crate::frontend::Channel;
 
+const NAG_THRESHOLD: usize = 3;
+
+/// Options for the chain-of-thought loop
+pub struct CotOptions {
+    /// Maximum turns before stopping. `None` = unbounded.
+    pub max_turns: Option<usize>,
+    /// Inject `<reminder>` when LLM ignores todos for too long
+    pub nag_reminder: bool,
+    /// Flush the channel when the LLM finishes (no more tool calls)
+    pub flush_on_done: bool,
+}
+
+/// Run the chain-of-thought loop: call LLM → dispatch tools → repeat
+///
+/// # Returns
+///
+/// The `total_tokens` from the last LLM call, if available.
+pub async fn cot_loop(
+    store: &mut SharedStore,
+    channel: &Arc<dyn Channel>,
+    http: &reqwest::Client,
+    opts: &CotOptions,
+) -> Result<Option<usize>> {
+    let mut last_total_tokens = None;
+    let llm = LLMCall {
+        channel: channel.clone(),
+        http: http.clone(),
+    };
+
+    let mut turns: usize = 0;
+    loop {
+        if let Some(max) = opts.max_turns {
+            if turns >= max {
+                break;
+            }
+        }
+        turns += 1;
+
+        let response = llm.run(store).await?;
+
+        if let Some(usage) = &response.usage {
+            last_total_tokens = Some(usage.total_tokens);
+        }
+
+        match response.tool_calls {
+            Some(tool_calls) => {
+                let mut had_todo = false;
+                for tc in &tool_calls {
+                    if tc.name == "todo" {
+                        had_todo = true;
+                    }
+                    let handled = dispatch_tool(
+                        &tc.name,
+                        tc.id.clone(),
+                        &tc.arguments,
+                        store,
+                        channel,
+                    )
+                    .await?;
+
+                    if !handled {
+                        store.context.history.push(Message {
+                            role: Role::Tool,
+                            content: Some(format!(
+                                "Unknown tool: {}",
+                                tc.name
+                            )),
+                            tool_calls: None,
+                            tool_call_id: Some(tc.id.clone()),
+                        });
+                    }
+                }
+
+                if opts.nag_reminder {
+                    if had_todo {
+                        store.state.todo.rounds_since_update = 0;
+                    } else {
+                        store.state.todo.rounds_since_update += 1;
+                    }
+                    if store.state.todo.rounds_since_update >= NAG_THRESHOLD
+                        && !store.state.todo.items.is_empty()
+                    {
+                        if let Some(last) =
+                            store.context.history.last_mut()
+                        {
+                            if last.role == Role::Tool {
+                                if let Some(content) = &mut last.content {
+                                    content.push_str(
+                                        "\n\n<reminder>Update your \
+                                         todos.</reminder>",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                if opts.flush_on_done {
+                    channel.flush().await;
+                }
+                break;
+            }
+        }
+    }
+
+    Ok(last_total_tokens)
+}
+
 /// Chain-of-thought agent
 ///
 /// Drives the LLM loop: call LLM → dispatch tool calls → repeat until done.
@@ -36,78 +145,16 @@ impl Agent {
         channel: &Arc<dyn Channel>,
         http: &reqwest::Client,
     ) -> Result<Option<usize>> {
-        let mut last_total_tokens = None;
-        let llm = LLMCall {
-            channel: channel.clone(),
-            http: http.clone(),
-        };
-
-        loop {
-            let response = llm.run(store).await?;
-
-            if let Some(usage) = &response.usage {
-                last_total_tokens = Some(usage.total_tokens);
-            }
-
-            match response.tool_calls {
-                Some(tool_calls) => {
-                    let mut had_todo = false;
-                    for tc in &tool_calls {
-                        if tc.name == "todo" {
-                            had_todo = true;
-                        }
-                        let handled = dispatch_tool(
-                            &tc.name,
-                            tc.id.clone(),
-                            &tc.arguments,
-                            store,
-                            channel,
-                        )
-                        .await?;
-
-                        if !handled {
-                            store.context.history.push(Message {
-                                role: Role::Tool,
-                                content: Some(format!(
-                                    "Unknown tool: {}",
-                                    tc.name
-                                )),
-                                tool_calls: None,
-                                tool_call_id: Some(tc.id.clone()),
-                            });
-                        }
-                    }
-
-                    // Nag reminder: nudge LLM to update todos
-                    if had_todo {
-                        store.state.todo.rounds_since_update = 0;
-                    } else {
-                        store.state.todo.rounds_since_update += 1;
-                    }
-                    if store.state.todo.rounds_since_update >= 3
-                        && !store.state.todo.items.is_empty()
-                    {
-                        if let Some(last) =
-                            store.context.history.last_mut()
-                        {
-                            if last.role == Role::Tool {
-                                if let Some(content) = &mut last.content {
-                                    content.push_str(
-                                        "\n\n<reminder>Update your \
-                                         todos.</reminder>",
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                None => {
-                    channel.flush().await;
-                    break;
-                }
-            }
-        }
-
-        Ok(last_total_tokens)
+        cot_loop(
+            store,
+            channel,
+            http,
+            &CotOptions {
+                max_turns: None,
+                nag_reminder: true,
+                flush_on_done: true,
+            },
+        )
+        .await
     }
 }

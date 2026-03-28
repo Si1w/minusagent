@@ -598,36 +598,10 @@ fn safe_path(raw: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::store::{Config, Context, LLMConfig, SystemState};
-    use crate::core::todo::TodoManager;
-    use crate::intelligence::manager::SharedAgents;
-
-    fn empty_store() -> SharedStore {
-        SharedStore {
-            context: Context {
-                system_prompt: String::new(),
-                history: Vec::new(),
-            },
-            state: SystemState {
-                config: Config {
-                    llm: LLMConfig {
-                        model: String::new(),
-                        base_url: String::new(),
-                        api_key: String::new(),
-                        context_window: 256_000,
-                    },
-                },
-                intelligence: None,
-                todo: TodoManager::new(),
-                is_subagent: false,
-                agents: SharedAgents::empty(),
-            },
-        }
-    }
 
     #[tokio::test]
     async fn test_bash_exec() {
-        let mut store = empty_store();
+        let mut store = SharedStore::test_default();
         let node = BashExec {
             call_id: "call_123".into(),
             command: "echo hello".into(),
@@ -649,7 +623,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bash_exec_dangerous() {
-        let store = empty_store();
+        let store = SharedStore::test_default();
         let node = BashExec {
             call_id: "call_456".into(),
             command: "sudo rm -rf /".into(),
@@ -661,7 +635,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_and_read_file() {
-        let mut store = empty_store();
+        let mut store = SharedStore::test_default();
         let test_path = "test_rw_output.txt";
 
         // Write
@@ -689,7 +663,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_edit_file() {
-        let mut store = empty_store();
+        let mut store = SharedStore::test_default();
         let test_path = "test_edit_output.txt";
         std::fs::write(test_path, "foo bar baz").unwrap();
 
@@ -718,7 +692,7 @@ mod tests {
             old_string: "nonexistent".into(),
             new_string: "replacement".into(),
         };
-        let result = node.run(&mut empty_store()).await;
+        let result = node.run(&mut SharedStore::test_default()).await;
         assert!(result.is_err());
 
         std::fs::remove_file(test_path).ok();
@@ -735,7 +709,7 @@ mod tests {
             old_string: "aaa".into(),
             new_string: "bbb".into(),
         };
-        let result = node.run(&mut empty_store()).await;
+        let result = node.run(&mut SharedStore::test_default()).await;
         assert!(result.is_err());
 
         std::fs::remove_file(test_path).ok();
@@ -758,7 +732,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_task_rejects_unknown_agent() {
-        let mut store = empty_store();
+        let mut store = SharedStore::test_default();
         let args = r#"{"prompt":"do something","agent":"nonexistent"}"#;
         let result =
             dispatch_tool("task", "t1".into(), args, &mut store, &silent())
@@ -774,7 +748,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_task_blocked_in_subagent() {
-        let mut store = empty_store();
+        let mut store = SharedStore::test_default();
         store.state.is_subagent = true;
 
         let args = r#"{"prompt":"do something","agent":"any"}"#;

@@ -108,35 +108,10 @@ impl Node for TodoWrite {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::store::{Config, Context, LLMConfig, SystemState};
-    use crate::intelligence::manager::SharedAgents;
-
-    fn empty_store() -> SharedStore {
-        SharedStore {
-            context: Context {
-                system_prompt: String::new(),
-                history: Vec::new(),
-            },
-            state: SystemState {
-                config: Config {
-                    llm: LLMConfig {
-                        model: String::new(),
-                        base_url: String::new(),
-                        api_key: String::new(),
-                        context_window: 256_000,
-                    },
-                },
-                intelligence: None,
-                todo: TodoManager::new(),
-                is_subagent: false,
-                agents: SharedAgents::empty(),
-            },
-        }
-    }
 
     #[tokio::test]
     async fn test_todo_write_basic() {
-        let mut store = empty_store();
+        let mut store = SharedStore::test_default();
         let node = TodoWrite {
             call_id: "t1".into(),
             items: vec![
@@ -164,7 +139,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_todo_write_rejects_multiple_in_progress() {
-        let store = empty_store();
+        let store = SharedStore::test_default();
         let node = TodoWrite {
             call_id: "t2".into(),
             items: vec![
@@ -224,7 +199,7 @@ mod tests {
     fn test_nag_reminder_triggers_after_3_rounds() {
         use crate::core::store::{Message, Role};
 
-        let mut store = empty_store();
+        let mut store = SharedStore::test_default();
         // Populate todo items so nag can trigger
         store.state.todo.items = vec![TodoItem {
             id: 1,
@@ -270,7 +245,7 @@ mod tests {
     fn test_nag_reminder_skipped_when_no_items() {
         use crate::core::store::{Message, Role};
 
-        let mut store = empty_store();
+        let mut store = SharedStore::test_default();
         // No todo items
         store.state.todo.rounds_since_update = 5;
 

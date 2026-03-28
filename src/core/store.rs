@@ -68,3 +68,30 @@ pub struct SharedStore {
     pub context: Context,
     pub state: SystemState,
 }
+
+#[cfg(test)]
+impl SharedStore {
+    /// Empty store with default config for unit tests
+    pub fn test_default() -> Self {
+        Self {
+            context: Context {
+                system_prompt: String::new(),
+                history: Vec::new(),
+            },
+            state: SystemState {
+                config: Config {
+                    llm: LLMConfig {
+                        model: String::new(),
+                        base_url: String::new(),
+                        api_key: String::new(),
+                        context_window: 256_000,
+                    },
+                },
+                intelligence: None,
+                todo: TodoManager::new(),
+                is_subagent: false,
+                agents: SharedAgents::empty(),
+            },
+        }
+    }
+}

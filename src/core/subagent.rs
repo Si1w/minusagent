@@ -5,13 +5,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::core::llm::LLMCall;
-use crate::core::node::Node;
+use crate::core::agent::{CotOptions, cot_loop};
 use crate::core::store::{
     Config, Context, LLMConfig, Message, Role, SharedStore, SystemState,
 };
 use crate::core::todo::TodoManager;
-use crate::core::tool::dispatch_tool;
 use crate::frontend::{Channel, SilentChannel};
 use crate::intelligence::Intelligence;
 use crate::intelligence::manager::SharedAgents;
@@ -84,42 +82,18 @@ pub fn run_subagent(
 
         let channel: Arc<dyn Channel> = Arc::new(SilentChannel);
         let http = reqwest::Client::new();
-        let llm = LLMCall {
-            channel: channel.clone(),
-            http: http.clone(),
-        };
 
-        for _ in 0..MAX_TURNS {
-            let response = llm.run(&mut store).await?;
-
-            match response.tool_calls {
-                Some(tool_calls) => {
-                    for tc in &tool_calls {
-                        let handled = dispatch_tool(
-                            &tc.name,
-                            tc.id.clone(),
-                            &tc.arguments,
-                            &mut store,
-                            &channel,
-                        )
-                        .await?;
-
-                        if !handled {
-                            store.context.history.push(Message {
-                                role: Role::Tool,
-                                content: Some(format!(
-                                    "Unknown tool: {}",
-                                    tc.name
-                                )),
-                                tool_calls: None,
-                                tool_call_id: Some(tc.id.clone()),
-                            });
-                        }
-                    }
-                }
-                None => break,
-            }
-        }
+        cot_loop(
+            &mut store,
+            &channel,
+            &http,
+            &CotOptions {
+                max_turns: Some(MAX_TURNS),
+                nag_reminder: false,
+                flush_on_done: false,
+            },
+        )
+        .await?;
 
         // Extract last assistant text as summary
         let summary = store
