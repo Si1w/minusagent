@@ -262,6 +262,10 @@ mod tests {
                 agents: SharedAgents::empty(),
                 tasks: None,
                 background: BackgroundManager::new(),
+                team: None,
+                team_name: None,
+                worktrees: None,
+                idle_requested: false,
             },
         }
     }
@@ -340,6 +344,10 @@ mod tests {
                 agents: SharedAgents::empty(),
                 tasks: None,
                 background: BackgroundManager::new(),
+                team: None,
+                team_name: None,
+                worktrees: None,
+                idle_requested: false,
             },
         };
 

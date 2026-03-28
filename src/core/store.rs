@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::core::task::{BackgroundManager, TaskManager};
+use crate::core::team::TeammateManager;
 use crate::core::todo::TodoManager;
+use crate::core::worktree::WorktreeManager;
 use crate::intelligence::Intelligence;
 use crate::intelligence::manager::SharedAgents;
 
@@ -63,6 +65,14 @@ pub struct SystemState {
     pub tasks: Option<TaskManager>,
     /// Background task runner with notification queue
     pub background: BackgroundManager,
+    /// Team manager for multi-agent collaboration
+    pub team: Option<TeammateManager>,
+    /// This agent's team name (`None` for lead, `Some` for teammates)
+    pub team_name: Option<String>,
+    /// Worktree manager for task isolation
+    pub worktrees: Option<WorktreeManager>,
+    /// Set by the `idle` tool to break out of cot_loop
+    pub idle_requested: bool,
 }
 
 /// Two-layer state container shared across all nodes
@@ -98,6 +108,10 @@ impl SharedStore {
                 agents: SharedAgents::empty(),
                 tasks: None,
                 background: BackgroundManager::new(),
+                team: None,
+                team_name: None,
+                worktrees: None,
+                idle_requested: false,
             },
         }
     }

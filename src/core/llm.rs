@@ -173,6 +173,8 @@ impl Node for LLMCall {
         let tools = all_tools(
             store.state.is_subagent,
             store.state.tasks.is_some(),
+            store.state.team.is_some(),
+            store.state.worktrees.is_some(),
         );
 
         Ok(LLMRequest {
@@ -345,6 +347,10 @@ mod tests {
                 agents: SharedAgents::empty(),
                 tasks: None,
                 background: BackgroundManager::new(),
+                team: None,
+                team_name: None,
+                worktrees: None,
+                idle_requested: false,
             },
         };
 

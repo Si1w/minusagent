@@ -32,7 +32,7 @@ Session (per session_key, built from AgentConfig)
 
 ```
 src/
-├── core/           node, agent, llm, session, store, tool
+├── core/           node, agent, llm, session, store, tool, team, worktree
 ├── intelligence/   manager, bootstrap, skills, memory, prompt, utils
 ├── routing/        router (Router trait, BindingRouter, BindingTable)
 ├── scheduler/      heartbeat, cron (background tasks with lane priority)
@@ -49,6 +49,7 @@ src/
 - **SharedStore**: Context (LLM-visible) + SystemState (LLM-invisible + optional Intelligence).
 - **Intelligence**: Dynamic 7-layer system prompt assembly. Enabled per-agent via `workspace_dir`.
 - **Scheduler**: Heartbeat (per-session, lane-priority yield) + Cron (global, 3 schedule types). Background output via global buffer, drained in TUI event loop.
+- **Team**: `TeammateManager` + `MessageBus` for multi-agent collaboration. Persistent teammates with JSONL inboxes, wake-on-message, and lifecycle management (working → idle → working → shutdown).
 
 ## Intelligence
 
@@ -105,6 +106,11 @@ WORKSPACE_DIR/
 | | `/route` | List bindings |
 | | `/route <ch> <agent>` | Bind channel to agent |
 | | `/route rm <ch>` | Remove binding |
+| Team | `/team` | Show team roster and status |
+| | `/inbox` | Check lead inbox |
+| | `/tasks` | Show task board with owners |
+| | `/worktrees` | List worktrees |
+| | `/events` | Worktree event log |
 | Scheduler | `/heartbeat` | Heartbeat status |
 | | `/trigger` | Manual heartbeat |
 | | `/cron` | List cron jobs |
@@ -130,6 +136,42 @@ Per-session lane lock (`Arc<tokio::sync::Mutex<()>>`) ensures user turns always 
 **Cron**: Global. Spawned in `Gateway::new()` from `CRON.json`. Three schedule types: `at`, `every`, `cron`. Auto-disables after 5 consecutive errors. Run log: `cron-runs.jsonl`.
 
 **Output**: Background results pushed to global buffer (`scheduler::push_bg_output`), drained by TUI event loop every 50ms frame.
+
+## Agent Teams
+
+Persistent multi-agent collaboration via JSONL inboxes. Located in `WORKSPACE_DIR/.team/`.
+
+```
+.team/
+  config.json           <- team roster + statuses
+  inbox/
+    alice.jsonl         <- append-only, drain-on-read
+    bob.jsonl
+    lead.jsonl
+```
+
+**TeammateManager**: Manages roster (`config.json`), spawns teammate tokio tasks, handles wake-on-message.
+
+**MessageBus**: JSONL file per agent. `send()` appends; `read_inbox()` reads all + truncates.
+
+**Lifecycle**: `spawn → WORKING → IDLE → WORKING → ... → SHUTDOWN`. Idle teammates wake when they receive a message.
+
+**Inbox drain**: In `cot_loop`, before each LLM call, the agent's inbox is auto-drained and injected into history (like background notifications). Lead agent name defaults to "lead".
+
+**Tools**: `team_spawn` (lead only), `team_send` (all), `team_read_inbox` (all). Teammates reuse agent identities from `SharedAgents` registry — same agent discovery as subagents.
+
+**Protocols**: Structured request-response over inbox with shared FSM (`pending → approved | rejected`):
+- **Shutdown**: `shutdown_request` (lead) → `shutdown_response` (teammate). Approval drops wake channel → teammate exits after current cycle.
+- **Plan approval**: `plan_submit` (teammate) → `plan_response` (lead). Approval/rejection wakes teammate with decision.
+- `InboxMessage.extra` carries protocol metadata (`request_id`, `approve`).
+
+**Autonomy**: Teammates self-organize via idle polling. After cot_loop finishes, they poll every 5s (up to 60s) for: (1) inbox messages, (2) unclaimed tasks on the task board (pending, no owner, not blocked). Auto-claims first available task. 60s timeout → shutdown. The `idle` tool lets teammates explicitly enter idle polling.
+
+**Identity re-injection**: When teammate history ≤ 3 messages (post-compression), identity block is re-inserted at the start.
+
+**Worktree isolation**: `WorktreeManager` creates per-task git worktrees (`git worktree add -b wt/{name}`). Tracked in `.worktrees/index.json`, lifecycle events in `events.jsonl`. Tools: `worktree_create` (with optional task binding), `worktree_remove` (with optional task completion), `worktree_keep`, `worktree_list`, `worktree_exec`. Task gets `worktree` field; `bind_worktree`/`unbind_worktree` link both sides.
+
+**vs Subagent**: Subagents (`task` tool) are one-shot with isolated context. Teammates are persistent with inbox communication, lifecycle management, and autonomous task claiming.
 
 ## Concurrency
 

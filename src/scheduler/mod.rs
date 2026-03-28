@@ -101,6 +101,10 @@ pub async fn run_single_turn(
             agents: crate::intelligence::manager::SharedAgents::empty(),
             tasks: None,
             background: BackgroundManager::new(),
+            team: None,
+            team_name: None,
+            worktrees: None,
+            idle_requested: false,
         },
     };
 

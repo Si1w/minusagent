@@ -13,7 +13,9 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use crate::core::session::Session;
 use crate::core::store::{Config, Context, LLMConfig, SharedStore, SystemState};
 use crate::core::task::{BackgroundManager, TaskManager};
+use crate::core::team::TeammateManager;
 use crate::core::todo::TodoManager;
+use crate::core::worktree::WorktreeManager;
 use crate::frontend::{Channel, UserMessage};
 use crate::intelligence::Intelligence;
 use crate::intelligence::manager::{AgentConfig, SharedAgents, normalize_agent_id};
@@ -71,6 +73,19 @@ impl ProviderConfig {
             .map(|ws| TaskManager::new(ws.join(".tasks")))
             .and_then(|r| r.ok());
 
+        let team = workspace_dir
+            .map(|ws| TeammateManager::new(&ws.join(".team")))
+            .and_then(|r| r.ok());
+
+        let worktrees = workspace_dir
+            .map(|ws| {
+                WorktreeManager::new(
+                    ws.join(".worktrees"),
+                    ws.clone(),
+                )
+            })
+            .and_then(|r| r.ok());
+
         SharedStore {
             context: Context {
                 system_prompt,
@@ -91,6 +106,10 @@ impl ProviderConfig {
                 agents,
                 tasks,
                 background: BackgroundManager::new(),
+                team,
+                team_name: None,
+                worktrees,
+                idle_requested: false,
             },
         }
     }

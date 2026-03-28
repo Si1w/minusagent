@@ -74,6 +74,36 @@ pub async fn cot_loop(
             });
         }
 
+        // Drain team inbox before LLM call
+        if let Some(team) = &store.state.team {
+            let name = store
+                .state
+                .team_name
+                .as_deref()
+                .unwrap_or("lead");
+            let msgs = team.bus().read_inbox(name);
+            if !msgs.is_empty() {
+                let inbox_json =
+                    serde_json::to_string(&msgs).unwrap_or_default();
+                store.context.history.push(Message {
+                    role: Role::User,
+                    content: Some(format!(
+                        "<inbox>\n{inbox_json}\n</inbox>"
+                    )),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+                store.context.history.push(Message {
+                    role: Role::Assistant,
+                    content: Some(
+                        "Noted inbox messages.".into(),
+                    ),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            }
+        }
+
         let response = llm.run(store).await?;
 
         if let Some(usage) = &response.usage {
@@ -107,6 +137,12 @@ pub async fn cot_loop(
                             tool_call_id: Some(tc.id.clone()),
                         });
                     }
+                }
+
+                // Check if idle was requested by a tool
+                if store.state.idle_requested {
+                    store.state.idle_requested = false;
+                    break;
                 }
 
                 if opts.nag_reminder {
