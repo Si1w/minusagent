@@ -474,15 +474,25 @@ pub async fn dispatch_tool(
             node.run(store).await?;
         }
         "todo" => {
-            let items: Vec<TodoItem> =
-                serde_json::from_value(args["items"].clone())
-                    .unwrap_or_default();
+            let items: Vec<TodoItem> = match serde_json::from_value(
+                args["items"].clone(),
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    log::warn!("todo: failed to parse items: {e}");
+                    push_tool_result(
+                        store,
+                        &call_id,
+                        format!("Error: invalid items JSON: {e}"),
+                    );
+                    return Ok(true);
+                }
+            };
             let node = TodoWrite {
                 call_id: call_id.clone(),
                 items,
             };
             if let Err(e) = node.run(store).await {
-                // Return validation errors as tool result so LLM can fix
                 push_tool_result(store, &call_id, format!("Error: {e}"));
             }
         }

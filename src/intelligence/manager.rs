@@ -173,17 +173,24 @@ impl SharedAgents {
 
     /// Look up an agent by ID
     pub fn get(&self, agent_id: &str) -> Option<AgentConfig> {
-        self.0.read().unwrap().get(agent_id).cloned()
+        self.read().get(agent_id).cloned()
     }
 
     /// List all registered agents
     pub fn list(&self) -> Vec<AgentConfig> {
-        self.0.read().unwrap().list().into_iter().cloned().collect()
+        self.read().list().into_iter().cloned().collect()
     }
 
     /// Resolve the effective model for an agent
     pub fn effective_model(&self, agent_id: &str) -> String {
-        self.0.read().unwrap().effective_model(agent_id)
+        self.read().effective_model(agent_id)
+    }
+
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, AgentManager> {
+        self.0.read().unwrap_or_else(|e| {
+            log::error!("AgentManager lock poisoned, recovering: {e}");
+            e.into_inner()
+        })
     }
 }
 

@@ -258,7 +258,10 @@ impl BindingRouter {
 
     /// Mutable access to the agent manager
     pub fn manager_mut(&mut self) -> RwLockWriteGuard<'_, AgentManager> {
-        self.mgr.write().unwrap()
+        self.mgr.write().unwrap_or_else(|e| {
+            log::error!("AgentManager write lock poisoned, recovering: {e}");
+            e.into_inner()
+        })
     }
 
     /// Read-only shared handle to the agent registry
@@ -274,7 +277,10 @@ impl BindingRouter {
 
 impl BindingRouter {
     fn build_result(&self, agent_id: &str, msg: &UserMessage) -> RouteResult {
-        let mgr = self.mgr.read().unwrap();
+        let mgr = self.mgr.read().unwrap_or_else(|e| {
+            log::error!("AgentManager read lock poisoned, recovering: {e}");
+            e.into_inner()
+        });
         let dm_scope = mgr
             .get(agent_id)
             .map(|a| a.dm_scope.as_str())
