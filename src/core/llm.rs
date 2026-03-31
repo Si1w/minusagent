@@ -198,7 +198,8 @@ impl Node for LLMCall {
             .bearer_auth(&prep_res.api_key)
             .json(&prep_res.body)
             .send()
-            .await?
+            .await
+            .map_err(|e| anyhow::anyhow!("LLM request to {} failed: {e}", prep_res.url))?
             .error_for_status()?;
 
         let mut content = String::new();

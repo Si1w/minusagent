@@ -5,6 +5,8 @@ use std::process::Command;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::scheduler::now_secs;
+
 /// Worktree lifecycle status
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,12 +58,6 @@ impl WorktreeManager {
         name: &str,
         task_id: Option<usize>,
     ) -> Result<String> {
-        if self.get(name).is_some() {
-            return Err(anyhow::anyhow!(
-                "Worktree '{name}' already exists"
-            ));
-        }
-
         let wt_path = self.dir.join(name);
         let abs_path = self
             .dir
@@ -192,8 +188,8 @@ impl WorktreeManager {
         Ok(format!("Worktree '{name}' marked as kept"))
     }
 
-    /// List all worktree entries
-    pub fn list(&self) -> Vec<WorktreeEntry> {
+    #[cfg(test)]
+    fn list(&self) -> Vec<WorktreeEntry> {
         self.load_index()
     }
 
@@ -260,10 +256,7 @@ impl WorktreeManager {
         name: &str,
         task_id: Option<usize>,
     ) {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64();
+        let ts = now_secs();
         let entry = serde_json::json!({
             "event": event,
             "name": name,

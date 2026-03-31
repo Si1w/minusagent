@@ -234,9 +234,11 @@ impl TaskManager {
             .collect())
     }
 
-    /// Atomically claim an unclaimed task
+    /// Claim an unclaimed task
     ///
     /// Sets the owner and changes status to `InProgress`.
+    /// Not atomic under concurrent access — file-based storage
+    /// has a read-modify-write window between `load` and `save`.
     ///
     /// # Errors
     ///
