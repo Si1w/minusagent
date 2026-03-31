@@ -75,6 +75,13 @@ pub struct SystemState {
     pub idle_requested: bool,
 }
 
+impl SystemState {
+    /// This agent's team identity ("lead" if unnamed)
+    pub fn sender_name(&self) -> &str {
+        self.team_name.as_deref().unwrap_or("lead")
+    }
+}
+
 /// Two-layer state container shared across all nodes
 ///
 /// - `context`: LLM-visible (system prompt, conversation history)

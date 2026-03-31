@@ -977,16 +977,34 @@ pub async fn dispatch_tool(
                 return Ok(true);
             }
 
-            let node = BashExec { call_id, command };
-            node.run(store).await?;
+            let node = BashExec {
+                call_id: call_id.clone(),
+                command,
+            };
+            if let Err(e) = node.run(store).await {
+                push_tool_result(
+                    store,
+                    &call_id,
+                    format!("Error: {e}"),
+                );
+            }
         }
         "read_file" => {
             let path = args["path"]
                 .as_str()
                 .unwrap_or_default()
                 .to_string();
-            let node = ReadFile { call_id, path };
-            node.run(store).await?;
+            let node = ReadFile {
+                call_id: call_id.clone(),
+                path,
+            };
+            if let Err(e) = node.run(store).await {
+                push_tool_result(
+                    store,
+                    &call_id,
+                    format!("Error: {e}"),
+                );
+            }
         }
         "write_file" => {
             let path = args["path"]
@@ -997,8 +1015,18 @@ pub async fn dispatch_tool(
                 .as_str()
                 .unwrap_or_default()
                 .to_string();
-            let node = WriteFile { call_id, path, content };
-            node.run(store).await?;
+            let node = WriteFile {
+                call_id: call_id.clone(),
+                path,
+                content,
+            };
+            if let Err(e) = node.run(store).await {
+                push_tool_result(
+                    store,
+                    &call_id,
+                    format!("Error: {e}"),
+                );
+            }
         }
         "edit_file" => {
             let path = args["path"]
@@ -1014,16 +1042,28 @@ pub async fn dispatch_tool(
                 .unwrap_or_default()
                 .to_string();
             let node = EditFile {
-                call_id,
+                call_id: call_id.clone(),
                 path,
                 old_string,
                 new_string,
             };
-            node.run(store).await?;
+            if let Err(e) = node.run(store).await {
+                push_tool_result(
+                    store,
+                    &call_id,
+                    format!("Error: {e}"),
+                );
+            }
         }
         "todo" => {
+            let raw = args.get("items").cloned()
+                .unwrap_or(serde_json::Value::Array(Vec::new()));
             let items: Vec<TodoItem> = match serde_json::from_value(
-                args["items"].clone(),
+                if raw.is_null() {
+                    serde_json::Value::Array(Vec::new())
+                } else {
+                    raw
+                },
             ) {
                 Ok(v) => v,
                 Err(e) => {
@@ -1420,12 +1460,7 @@ pub async fn dispatch_tool(
             }
         }
         "team_send" => {
-            let sender = store
-                .state
-                .team_name
-                .as_deref()
-                .unwrap_or("lead")
-                .to_string();
+            let sender = store.state.sender_name().to_string();
             let to = args["to"]
                 .as_str()
                 .unwrap_or_default()
@@ -1486,12 +1521,7 @@ pub async fn dispatch_tool(
             }
         }
         "shutdown_response" => {
-            let sender = store
-                .state
-                .team_name
-                .as_deref()
-                .unwrap_or("lead")
-                .to_string();
+            let sender = store.state.sender_name().to_string();
             let team = store.state.team.clone();
             match team {
                 Some(team) => {
@@ -1528,12 +1558,7 @@ pub async fn dispatch_tool(
             }
         }
         "plan_submit" => {
-            let sender = store
-                .state
-                .team_name
-                .as_deref()
-                .unwrap_or("lead")
-                .to_string();
+            let sender = store.state.sender_name().to_string();
             let team = store.state.team.clone();
             match team {
                 Some(team) => {
@@ -1597,12 +1622,7 @@ pub async fn dispatch_tool(
             }
         }
         "team_read_inbox" => {
-            let default_name = store
-                .state
-                .team_name
-                .as_deref()
-                .unwrap_or("lead")
-                .to_string();
+            let default_name = store.state.sender_name().to_string();
             let name = args
                 .get("name")
                 .and_then(|v| v.as_str())

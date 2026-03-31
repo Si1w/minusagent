@@ -198,7 +198,8 @@ async fn generate_tldr(
         .bearer_auth(api_key)
         .json(&body)
         .send()
-        .await?
+        .await
+        .map_err(|e| anyhow::anyhow!("LLM request to {url} failed: {e}"))?
         .error_for_status()?
         .json()
         .await?;

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -17,10 +18,12 @@ use crate::core::todo::TodoManager;
 use crate::frontend::SilentChannel;
 use crate::intelligence::Intelligence;
 use crate::intelligence::manager::SharedAgents;
+use crate::scheduler::now_secs;
 
 use tokio::time::Duration;
 
 const MAX_TEAMMATE_TURNS: usize = 50;
+const REQUEST_ID_LEN: usize = 8;
 const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -93,29 +96,31 @@ impl MessageBus {
 
     /// Read and drain all messages from an inbox
     ///
-    /// Returns the messages and truncates the file.
+    /// Opens the file once, reads content, then truncates while
+    /// still holding the handle — prevents a concurrent reader
+    /// from seeing the same messages.
     pub fn read_inbox(&self, name: &str) -> Vec<InboxMessage> {
         let path = self.dir.join(format!("{name}.jsonl"));
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
+        let mut f = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(f) => f,
             Err(_) => return Vec::new(),
         };
-        let msgs: Vec<InboxMessage> = content
+        let mut content = String::new();
+        if std::io::Read::read_to_string(&mut f, &mut content).is_err() {
+            return Vec::new();
+        }
+        // Truncate while still holding the handle
+        let _ = f.set_len(0);
+        content
             .lines()
             .filter(|l| !l.trim().is_empty())
             .filter_map(|l| serde_json::from_str(l).ok())
-            .collect();
-        // Drain
-        let _ = std::fs::write(&path, "");
-        msgs
+            .collect()
     }
-}
-
-fn now_secs() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64()
 }
 
 // ── Teammate Manager ─────────────────────────────────────
@@ -147,6 +152,16 @@ pub enum RequestStatus {
     Pending,
     Approved,
     Rejected,
+}
+
+impl fmt::Display for RequestStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pending => write!(f, "pending"),
+            Self::Approved => write!(f, "approved"),
+            Self::Rejected => write!(f, "rejected"),
+        }
+    }
 }
 
 /// Tracked shutdown request
@@ -194,12 +209,13 @@ impl TeammateManager {
         let bus = MessageBus::new(&team_dir.join("inbox"))?;
 
         let config_path = team_dir.join("config.json");
-        let members: Vec<TeammateEntry> = if config_path.exists() {
-            let content = std::fs::read_to_string(&config_path)?;
-            serde_json::from_str(&content).unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let members: Vec<TeammateEntry> =
+            match std::fs::read_to_string(&config_path) {
+                Ok(content) => {
+                    serde_json::from_str(&content).unwrap_or_default()
+                }
+                Err(_) => Vec::new(),
+            };
 
         Ok(Self {
             inner: Arc::new(Mutex::new(TeamInner {
@@ -394,7 +410,7 @@ impl TeammateManager {
         }
 
         let req_id =
-            uuid::Uuid::new_v4().to_string()[..8].to_string();
+            uuid::Uuid::new_v4().to_string()[..REQUEST_ID_LEN].to_string();
 
         {
             let mut inner = self.inner.lock().unwrap();
@@ -505,7 +521,7 @@ impl TeammateManager {
         plan: &str,
     ) -> Result<String> {
         let req_id =
-            uuid::Uuid::new_v4().to_string()[..8].to_string();
+            uuid::Uuid::new_v4().to_string()[..REQUEST_ID_LEN].to_string();
 
         {
             let mut inner = self.inner.lock().unwrap();
@@ -616,25 +632,15 @@ impl TeammateManager {
         let inner = self.inner.lock().unwrap();
         let mut lines = Vec::new();
         for (id, req) in &inner.shutdown_requests {
-            let status = match req.status {
-                RequestStatus::Pending => "pending",
-                RequestStatus::Approved => "approved",
-                RequestStatus::Rejected => "rejected",
-            };
             lines.push(format!(
-                "  shutdown {id} -> {} ({status})",
-                req.target
+                "  shutdown {id} -> {} ({})",
+                req.target, req.status
             ));
         }
         for (id, req) in &inner.plan_requests {
-            let status = match req.status {
-                RequestStatus::Pending => "pending",
-                RequestStatus::Approved => "approved",
-                RequestStatus::Rejected => "rejected",
-            };
             lines.push(format!(
-                "  plan {id} from {} ({status})",
-                req.from
+                "  plan {id} from {} ({})",
+                req.from, req.status
             ));
         }
         if lines.is_empty() {
@@ -647,15 +653,21 @@ impl TeammateManager {
     fn set_status(&self, name: &str, status: TeammateStatus) {
         let is_shutdown = status == TeammateStatus::Shutdown;
         let mut inner = self.inner.lock().unwrap();
+        let mut changed = false;
         if let Some(m) =
             inner.members.iter_mut().find(|m| m.name == name)
         {
-            m.status = status;
+            if m.status != status {
+                m.status = status;
+                changed = true;
+            }
         }
         if is_shutdown {
             inner.wake_txs.remove(name);
         }
-        let _ = save_config(&inner);
+        if changed {
+            let _ = save_config(&inner);
+        }
     }
 }
 

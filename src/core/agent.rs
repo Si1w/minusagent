@@ -76,11 +76,7 @@ pub async fn cot_loop(
 
         // Drain team inbox before LLM call
         if let Some(team) = &store.state.team {
-            let name = store
-                .state
-                .team_name
-                .as_deref()
-                .unwrap_or("lead");
+            let name = store.state.sender_name();
             let msgs = team.bus().read_inbox(name);
             if !msgs.is_empty() {
                 let inbox_json =
