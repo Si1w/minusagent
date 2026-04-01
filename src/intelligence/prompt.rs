@@ -6,13 +6,28 @@ use crate::intelligence::PromptMode;
 use crate::intelligence::memory::MemoryEntry;
 use crate::intelligence::skills::Skill;
 
+/// Boundary marker between static (cacheable) and dynamic (per-turn) layers.
+///
+/// Placing this in the prompt text helps LLM providers with KV cache prefix
+/// matching: everything before this marker is byte-identical across turns.
+const DYNAMIC_BOUNDARY: &str = "═══ DYNAMIC_BOUNDARY ═══";
+
 /// Wrap content as a `# heading` section, returns `None` if content is empty
+///
+/// Strips a leading H1 line from content if it matches the heading to avoid
+/// duplication (e.g. TOOLS.md starting with `# Tool Usage Guidelines`).
 fn section(heading: &str, content: &str) -> Option<String> {
     let content = content.trim();
     if content.is_empty() {
         return None;
     }
-    Some(format!("# {heading}\n\n{content}"))
+    let body = match content.split_once('\n') {
+        Some((first, rest)) if first.trim().trim_start_matches('#').trim() == heading => {
+            rest.trim_start()
+        }
+        _ => content,
+    };
+    Some(format!("# {heading}\n\n{body}"))
 }
 
 /// Format memory TLDRs into prompt content (without heading)
@@ -53,31 +68,26 @@ pub fn format_skills_content(skills: &[Skill]) -> String {
         .join("\n")
 }
 
-/// Build the system prompt by assembling 7 layers
+/// Build the static prefix (cacheable across turns within a session)
 ///
-/// # Layers
+/// # Static Layers
 ///
 /// 1. Identity (AGENT.md body)
 /// 2. Tool usage guidelines (TOOLS.md)
 /// 3. Skills (name + description summary)
-/// 4. Memory (TLDR index)
 /// 5. Bootstrap context (HEARTBEAT.md, BOOTSTRAP.md, AGENTS.md, USER.md)
-/// 6. Runtime context (agent_id, model, time, mode)
 /// 7. Channel hints
-pub fn build_system_prompt(
+pub fn build_static_prefix(
     mode: PromptMode,
     identity: &str,
     bootstrap: &HashMap<String, String>,
     skills: &[Skill],
-    memories: &[MemoryEntry],
-    agent_id: &str,
-    model: &str,
     channel: &str,
 ) -> String {
     let is_full = mode == PromptMode::Full;
     let mut sections: Vec<String> = Vec::new();
 
-    // Layer 1: Identity (AGENT.md body)
+    // Layer 1: Identity
     if !identity.trim().is_empty() {
         sections.push(identity.to_string());
     }
@@ -88,16 +98,10 @@ pub fn build_system_prompt(
         bootstrap.get("TOOLS.md").map(|s| s.as_str()).unwrap_or(""),
     ));
 
-    // Layer 3: Skills (name + description only; body loaded on activation)
+    // Layer 3: Skills
     if is_full {
         let skills_block = format_skills_content(skills);
         sections.extend(section("Available Skills", &skills_block));
-    }
-
-    // Layer 4: Memory (TLDR index; full content loaded via read_file)
-    if is_full {
-        let memory_block = format_memory_content(memories);
-        sections.extend(section("Memory", &memory_block));
     }
 
     // Layer 5: Bootstrap context
@@ -109,6 +113,34 @@ pub fn build_system_prompt(
                 bootstrap.get(name).map(|s| s.as_str()).unwrap_or(""),
             ));
         }
+    }
+
+    // Layer 7: Channel hints
+    sections.extend(section("Channel", channel_hint(channel)));
+
+    sections.join("\n\n")
+}
+
+/// Build the dynamic suffix (rebuilt each turn)
+///
+/// # Dynamic Layers
+///
+/// 4. Memory (TLDR index — hot-updated via /remember)
+/// 6. Runtime context (timestamp changes each turn)
+pub fn build_dynamic_suffix(
+    mode: PromptMode,
+    memories: &[MemoryEntry],
+    agent_id: &str,
+    model: &str,
+    channel: &str,
+) -> String {
+    let is_full = mode == PromptMode::Full;
+    let mut sections: Vec<String> = Vec::new();
+
+    // Layer 4: Memory
+    if is_full {
+        let memory_block = format_memory_content(memories);
+        sections.extend(section("Memory", &memory_block));
     }
 
     // Layer 6: Runtime context
@@ -124,10 +156,34 @@ pub fn build_system_prompt(
         ),
     ));
 
-    // Layer 7: Channel hints
-    sections.extend(section("Channel", channel_hint(channel)));
-
     sections.join("\n\n")
+}
+
+/// Build the full system prompt by joining static prefix and dynamic suffix
+///
+/// Convenience function that assembles all 7 layers with a boundary marker.
+#[cfg(test)]
+fn build_system_prompt(
+    mode: PromptMode,
+    identity: &str,
+    bootstrap: &HashMap<String, String>,
+    skills: &[Skill],
+    memories: &[MemoryEntry],
+    agent_id: &str,
+    model: &str,
+    channel: &str,
+) -> String {
+    let static_part = build_static_prefix(mode, identity, bootstrap, skills, channel);
+    let dynamic_part = build_dynamic_suffix(mode, memories, agent_id, model, channel);
+    join_prompt(&static_part, &dynamic_part)
+}
+
+/// Join static prefix and dynamic suffix with boundary marker
+pub fn join_prompt(static_prefix: &str, dynamic_suffix: &str) -> String {
+    if dynamic_suffix.is_empty() {
+        return static_prefix.to_string();
+    }
+    format!("{static_prefix}\n\n{DYNAMIC_BOUNDARY}\n\n{dynamic_suffix}")
 }
 
 fn channel_hint(channel: &str) -> &str {
@@ -229,5 +285,65 @@ mod tests {
             section("Title", "content").unwrap(),
             "# Title\n\ncontent"
         );
+    }
+
+    #[test]
+    fn test_section_strips_duplicate_heading() {
+        let result = section("Tool Usage Guidelines", "# Tool Usage Guidelines\n\nBody text.");
+        assert_eq!(
+            result.unwrap(),
+            "# Tool Usage Guidelines\n\nBody text."
+        );
+    }
+
+    #[test]
+    fn test_section_keeps_non_matching_heading() {
+        let result = section("Title", "# Different Heading\n\nBody text.");
+        assert_eq!(
+            result.unwrap(),
+            "# Title\n\n# Different Heading\n\nBody text."
+        );
+    }
+
+    #[test]
+    fn test_boundary_present_with_dynamic_content() {
+        let prompt = build_system_prompt(
+            PromptMode::Full, "Identity.", &HashMap::new(),
+            &[], &[], "main", "gpt-4", "cli",
+        );
+        assert!(
+            prompt.contains(DYNAMIC_BOUNDARY),
+            "should contain boundary marker when dynamic content exists"
+        );
+    }
+
+    #[test]
+    fn test_static_prefix_stable_across_calls() {
+        let a = build_static_prefix(
+            PromptMode::Full, "Identity.", &HashMap::new(), &[], "cli",
+        );
+        let b = build_static_prefix(
+            PromptMode::Full, "Identity.", &HashMap::new(), &[], "cli",
+        );
+        assert_eq!(a, b, "static prefix should be identical across calls");
+    }
+
+    #[test]
+    fn test_static_excludes_memory_and_runtime() {
+        let memories = vec![MemoryEntry {
+            name: "fact".into(),
+            tldr: "A fact".into(),
+            path: "/memory/fact.md".into(),
+        }];
+        let static_part = build_static_prefix(
+            PromptMode::Full, "Identity.", &HashMap::new(), &[], "cli",
+        );
+        let dynamic_part = build_dynamic_suffix(
+            PromptMode::Full, &memories, "main", "gpt-4", "cli",
+        );
+        assert!(!static_part.contains("Memory"));
+        assert!(!static_part.contains("Runtime Context"));
+        assert!(dynamic_part.contains("Memory"));
+        assert!(dynamic_part.contains("Runtime Context"));
     }
 }

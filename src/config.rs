@@ -46,9 +46,9 @@ pub struct Tuning {
     pub idle_poll_interval_secs: u64,
     /// Discord reconnection delay
     pub reconnect_delay_secs: u64,
-    /// Default heartbeat execution interval
+    /// Default heartbeat interval (overridden by HEARTBEAT.md frontmatter)
     pub heartbeat_interval_secs: u64,
-    /// Default heartbeat active hours (start, end)
+    /// Default heartbeat active hours (overridden by HEARTBEAT.md frontmatter)
     pub heartbeat_active_hours: (u8, u8),
 
     // ── Limits ──
@@ -64,6 +64,10 @@ pub struct Tuning {
     pub bootstrap_max_file_chars: usize,
     /// Max total chars for bootstrap context
     pub bootstrap_max_total_chars: usize,
+    /// Max results returned by glob tool
+    pub glob_max_results: usize,
+    /// Max matches returned by grep tool
+    pub grep_max_results: usize,
 
     // ── Resilience ──
     /// Max overflow compaction attempts
@@ -114,6 +118,8 @@ impl Default for Tuning {
             max_skills: 150,
             bootstrap_max_file_chars: 20_000,
             bootstrap_max_total_chars: 150_000,
+            glob_max_results: 500,
+            grep_max_results: 200,
 
             max_overflow_compaction: 2,
             auth_cooldown_secs: 300,
