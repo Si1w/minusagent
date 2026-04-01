@@ -10,7 +10,7 @@ use crate::routing::router::Router;
 // ── CLI command definitions ────────────────────────────────
 
 #[derive(Parser)]
-#[command(name = "/", no_binary_name = true, disable_help_flag = true)]
+#[command(name = "/", no_binary_name = true, disable_help_flag = true, disable_help_subcommand = true)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
