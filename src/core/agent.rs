@@ -5,10 +5,9 @@ use anyhow::Result;
 use crate::core::llm::LLMCall;
 use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore};
+use crate::config::tuning;
 use crate::core::tool::dispatch_tool;
 use crate::frontend::Channel;
-
-const NAG_THRESHOLD: usize = 3;
 
 /// Options for the chain-of-thought loop
 pub struct CotOptions {
@@ -147,7 +146,7 @@ pub async fn cot_loop(
                     } else {
                         store.state.todo.rounds_since_update += 1;
                     }
-                    if store.state.todo.rounds_since_update >= NAG_THRESHOLD
+                    if store.state.todo.rounds_since_update >= tuning().nag_threshold
                         && !store.state.todo.items.is_empty()
                     {
                         if let Some(last) =

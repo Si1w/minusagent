@@ -15,9 +15,8 @@ use crate::core::task::{BackgroundStatus, TaskStatus};
 use crate::core::todo::{TodoItem, TodoWrite};
 use crate::frontend::Channel;
 use crate::core::worktree::WorktreeStatus;
+use crate::config::tuning;
 use crate::intelligence::manager::normalize_agent_id;
-
-const BASH_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Tool definition for LLM function calling registration
 #[derive(Debug, Clone, Serialize)]
@@ -58,12 +57,13 @@ impl Node for BashExec {
     }
 
     async fn exec(&self, command: String) -> Result<String> {
+        let timeout = Duration::from_secs(tuning().bash_timeout_secs);
         let output = tokio::time::timeout(
-            BASH_TIMEOUT,
+            timeout,
             Command::new("sh").arg("-c").arg(&command).output(),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("command timed out after {}s", BASH_TIMEOUT.as_secs()))??;
+        .map_err(|_| anyhow::anyhow!("command timed out after {}s", timeout.as_secs()))??;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1819,9 +1819,10 @@ pub async fn dispatch_tool(
                                         .into(),
                                 );
                             } else {
+                                let bash_timeout = Duration::from_secs(tuning().bash_timeout_secs);
                                 let result =
                                     tokio::time::timeout(
-                                        BASH_TIMEOUT,
+                                        bash_timeout,
                                         Command::new("sh")
                                             .arg("-c")
                                             .arg(&command)
@@ -1855,7 +1856,7 @@ pub async fn dispatch_tool(
                                     }
                                     Err(_) => format!(
                                         "Error: timeout ({}s)",
-                                        BASH_TIMEOUT.as_secs()
+                                        bash_timeout.as_secs()
                                     ),
                                 };
                                 push_tool_result(

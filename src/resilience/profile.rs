@@ -42,27 +42,6 @@ impl ProfileManager {
         Self { profiles }
     }
 
-    /// Load profiles from environment variables
-    ///
-    /// Reads `LLM_API_KEY` as the primary profile, then `LLM_API_KEY_2`,
-    /// `LLM_API_KEY_3`, ... up to `LLM_API_KEY_9`.
-    /// Optionally reads `LLM_BASE_URL_N` for per-profile base URL override.
-    pub fn from_env(primary_key: &str, primary_base_url: &str) -> Self {
-        let mut profiles = vec![AuthProfile::new(
-            primary_key.to_string(),
-            Some(primary_base_url.to_string()),
-        )];
-
-        for i in 2..=9 {
-            if let Ok(key) = std::env::var(format!("LLM_API_KEY_{i}")) {
-                let base_url = std::env::var(format!("LLM_BASE_URL_{i}")).ok();
-                profiles.push(AuthProfile::new(key, base_url));
-            }
-        }
-
-        Self::new(profiles)
-    }
-
     /// Select the first non-cooldown profile
     pub fn select(&self) -> Option<usize> {
         self.profiles.iter().position(|p| p.is_available())

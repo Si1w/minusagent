@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.102"
 async-trait = "0.1.89"
-dotenvy = "0.15.7"
 futures-util = "0.3.32"
 reqwest = { version = "0.13.2", features = ["json", "stream"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -21,6 +20,7 @@ crossterm = { version = "0.29.0", features = ["event-stream"] }
 unicode-width = "0.2.2"
 regex = "1.12.3"
 cron = "0.15"
+clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 dotenvy = "0.15.7"

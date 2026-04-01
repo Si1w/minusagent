@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::config::tuning;
 use crate::intelligence::utils::{discover_subdirs, extract_body};
-
-const MAX_SKILLS: usize = 150;
 
 /// A discovered skill (frontmatter only, body loaded on activation)
 #[derive(Debug, Clone)]
@@ -77,7 +76,7 @@ impl SkillsManager {
 
         self.skills = seen.into_values().collect();
         self.skills.sort_by(|a, b| a.name.cmp(&b.name));
-        self.skills.truncate(MAX_SKILLS);
+        self.skills.truncate(tuning().max_skills);
     }
 }
 
