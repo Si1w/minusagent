@@ -10,8 +10,9 @@ use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+use crate::config::{AppConfig, LLMConfig, tuning};
 use crate::core::session::Session;
-use crate::core::store::{Config, Context, LLMConfig, SharedStore, SystemState};
+use crate::core::store::{Config, Context, SharedStore, SystemState};
 use crate::core::task::{BackgroundManager, TaskManager};
 use crate::core::team::TeammateManager;
 use crate::core::todo::TodoManager;
@@ -25,42 +26,7 @@ use crate::scheduler::LaneLock;
 use crate::scheduler::cron::{CronHandle, CronJobStatus};
 use crate::scheduler::lane::CommandQueue;
 
-/// Global LLM provider config (shared across all agents)
-pub struct ProviderConfig {
-    pub base_url: String,
-    pub api_key: String,
-    pub context_window: usize,
-    pub default_model: String,
-    pub workspace_dir: Option<PathBuf>,
-}
-
-impl ProviderConfig {
-    /// Load provider config from environment variables
-    ///
-    /// # Panics
-    ///
-    /// Panics if required env vars (`LLM_MODEL`, `LLM_BASE_URL`, `LLM_API_KEY`,
-    /// `LLM_CONTEXT_WINDOW`) are missing or malformed.
-    pub fn from_env() -> Self {
-        Self {
-            default_model: std::env::var("LLM_MODEL")
-                .expect("LLM_MODEL not set"),
-            base_url: std::env::var("LLM_BASE_URL")
-                .expect("LLM_BASE_URL not set"),
-            api_key: std::env::var("LLM_API_KEY")
-                .expect("LLM_API_KEY not set"),
-            context_window: std::env::var("LLM_CONTEXT_WINDOW")
-                .expect("LLM_CONTEXT_WINDOW not set")
-                .parse()
-                .expect("LLM_CONTEXT_WINDOW must be a number"),
-            workspace_dir: std::env::var("WORKSPACE_DIR")
-                .ok()
-                .map(PathBuf::from)
-                .or_else(|| Some(PathBuf::from("./workspace")))
-                .filter(|p| p.is_dir()),
-        }
-    }
-
+impl AppConfig {
     fn build_store(
         &self,
         system_prompt: String,
@@ -95,9 +61,9 @@ impl ProviderConfig {
                 config: Config {
                     llm: LLMConfig {
                         model,
-                        base_url: self.base_url.clone(),
-                        api_key: self.api_key.clone(),
-                        context_window: self.context_window,
+                        base_url: self.primary_llm().base_url.clone(),
+                        api_key: self.primary_llm().api_key.clone(),
+                        context_window: self.primary_llm().context_window,
                     },
                 },
                 intelligence,
@@ -141,11 +107,11 @@ pub struct DispatchResult {
 
 /// Central dispatcher: routes messages and manages session lifecycle
 ///
-/// Owns the shared state (router + agent manager), provider config,
+/// Owns the shared state (router + agent manager), app config,
 /// and the per-session task pool.
 pub struct Gateway {
     state: SharedState,
-    provider: ProviderConfig,
+    config: AppConfig,
     session_txs: Mutex<HashMap<String, mpsc::Sender<SessionMessage>>>,
     cron_handle: Mutex<Option<CronHandle>>,
     delivery: DeliveryHandle,
@@ -153,7 +119,7 @@ pub struct Gateway {
 
 impl Gateway {
     /// Create a new gateway
-    pub async fn new(state: SharedState, provider: ProviderConfig) -> Self {
+    pub async fn new(state: SharedState, config: AppConfig) -> Self {
         // Outbound sinks are shared between router and delivery runner
         let outbound = {
             let s = state.read().await;
@@ -161,7 +127,7 @@ impl Gateway {
         };
 
         // Start delivery runner
-        let delivery_dir = provider
+        let delivery_dir = config
             .workspace_dir
             .as_ref()
             .map(|ws| ws.join(".delivery"))
@@ -173,21 +139,15 @@ impl Gateway {
         .expect("Failed to start delivery runner");
 
         // Start cron service if CRON.json exists
-        let cron_handle = provider
+        let cron_handle = config
             .workspace_dir
             .as_ref()
             .map(|ws| {
                 let cron_file = ws.join("CRON.json");
                 if cron_file.exists() {
-                    let llm_config = LLMConfig {
-                        model: provider.default_model.clone(),
-                        base_url: provider.base_url.clone(),
-                        api_key: provider.api_key.clone(),
-                        context_window: provider.context_window,
-                    };
                     Some(crate::scheduler::cron::spawn(
                         cron_file,
-                        llm_config,
+                        config.primary_llm().clone(),
                         delivery.clone(),
                     ))
                 } else {
@@ -198,7 +158,7 @@ impl Gateway {
 
         Self {
             state,
-            provider,
+            config,
             session_txs: Mutex::new(HashMap::new()),
             cron_handle: Mutex::new(cron_handle),
             delivery,
@@ -208,6 +168,11 @@ impl Gateway {
     /// Read access to the shared state
     pub fn state(&self) -> &SharedState {
         &self.state
+    }
+
+    /// Read access to the app config
+    pub fn config(&self) -> &AppConfig {
+        &self.config
     }
 
     /// Get the delivery handle
@@ -271,7 +236,7 @@ impl Gateway {
                 .map(|a| a.workspace_dir.clone())
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from)
-                .or(self.provider.workspace_dir.clone());
+                .or(self.config.workspace_dir.clone());
             (result.session_key, prompt, model, result.agent_id, ch, ws, agents)
         };
 
@@ -310,7 +275,7 @@ impl Gateway {
                     .as_ref()
                     .map(|i| i.build_prompt())
                     .unwrap_or(system_prompt.clone());
-                let store = self.provider.build_store(
+                let store = self.config.build_store(
                     initial_prompt,
                     model.clone(),
                     intelligence,
@@ -327,38 +292,32 @@ impl Gateway {
                     .as_ref()
                     .filter(|ws| ws.join("HEARTBEAT.md").exists())
                     .map(|ws| {
-                        let llm_config = LLMConfig {
-                            model: model.clone(),
-                            base_url: self
-                                .provider
-                                .base_url
-                                .clone(),
-                            api_key: self
-                                .provider
-                                .api_key
-                                .clone(),
-                            context_window: self
-                                .provider
-                                .context_window,
-                        };
+                        let mut llm_config = self.config.primary_llm().clone();
+                        llm_config.model = model.clone();
                         crate::scheduler::heartbeat::spawn(
                             ws.clone(),
                             lane_lock.clone(),
                             llm_config,
                             system_prompt,
-                            tokio::time::Duration::from_secs(1800),
-                            (9, 22),
+                            tokio::time::Duration::from_secs(tuning().heartbeat_interval_secs),
+                            tuning().heartbeat_active_hours,
                             self.delivery.clone(),
                             "bg".to_string(),
                             String::new(),
                         )
                     });
 
+                let extra_profiles = self.config.extra_profiles()
+                    .iter()
+                    .map(|p| p.to_auth_profile())
+                    .collect::<Vec<_>>();
+                let fallback_models = self.config.fallback_models.clone();
+
                 let lock = lane_lock.clone();
                 let (stx, mut srx) =
                     mpsc::channel::<SessionMessage>(8);
                 tokio::spawn(async move {
-                    let mut session = match Session::new(store, lock, hb_handle) {
+                    let mut session = match Session::new(store, lock, hb_handle, extra_profiles, fallback_models) {
                         Ok(s) => s,
                         Err(e) => {
                             log::error!("Failed to create session: {e}");

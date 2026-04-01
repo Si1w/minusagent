@@ -4,9 +4,8 @@ use std::sync::{Arc, LazyLock, RwLock};
 
 use regex::Regex;
 
+use crate::config::tuning;
 use crate::intelligence::utils::{discover_subdirs, extract_body};
-
-const DEFAULT_AGENT_ID: &str = "mandeven";
 
 static VALID_ID_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-z0-9][a-z0-9_-]{0,63}$").unwrap());
@@ -28,7 +27,7 @@ static INVALID_CHARS_RE: LazyLock<Regex> =
 pub fn normalize_agent_id(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return DEFAULT_AGENT_ID.to_string();
+        return tuning().default_agent_id.clone();
     }
     if VALID_ID_RE.is_match(trimmed) {
         return trimmed.to_lowercase();
@@ -37,7 +36,7 @@ pub fn normalize_agent_id(value: &str) -> String {
     let cleaned = INVALID_CHARS_RE.replace_all(&lower, "-");
     let cleaned = cleaned.trim_matches('-');
     if cleaned.is_empty() {
-        return DEFAULT_AGENT_ID.to_string();
+        return tuning().default_agent_id.clone();
     }
     cleaned[..cleaned.len().min(64)].to_string()
 }

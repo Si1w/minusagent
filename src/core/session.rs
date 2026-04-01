@@ -12,13 +12,13 @@ use crate::core::store::{Message, Role, SharedStore};
 use crate::frontend::{Channel, SilentChannel};
 use crate::core::team::TeammateStatus;
 use crate::intelligence::memory::MemoryWrite;
-use crate::resilience::profile::ProfileManager;
+use crate::resilience::profile::{AuthProfile, ProfileManager};
 use crate::resilience::runner::ResilienceRunner;
+use crate::config::tuning;
 use crate::scheduler::{LANE_SESSION, LaneLock};
 use crate::scheduler::heartbeat::HeartbeatHandle;
 
 const SESSIONS_DIR: &str = "sessions";
-const COMPACT_THRESHOLD: f64 = 0.8;
 
 /// Index entry for a session
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,16 +209,16 @@ impl Session {
         store: SharedStore,
         lane_lock: LaneLock,
         heartbeat: Option<HeartbeatHandle>,
+        extra_profiles: Vec<AuthProfile>,
+        fallback_models: Vec<String>,
     ) -> Result<Self> {
         let session_store = SessionStore::new(Path::new(SESSIONS_DIR))?;
         let http = reqwest::Client::new();
 
-        let profiles = ProfileManager::from_env(
-            &store.state.config.llm.api_key,
-            &store.state.config.llm.base_url,
-        );
-        let fallbacks = ResilienceRunner::fallback_models_from_env();
-        let resilience = ResilienceRunner::new(profiles, fallbacks);
+        let mut all_profiles = vec![store.state.config.llm.to_auth_profile()];
+        all_profiles.extend(extra_profiles);
+        let profiles = ProfileManager::new(all_profiles);
+        let resilience = ResilienceRunner::new(profiles, fallback_models);
 
         Ok(Self {
             store,
@@ -281,7 +281,7 @@ impl Session {
         let context_window = self.store.state.config.llm.context_window;
         if let Some(tokens) = total_tokens {
             let threshold =
-                (context_window as f64 * COMPACT_THRESHOLD) as usize;
+                (context_window as f64 * tuning().compact_threshold) as usize;
             if tokens > threshold {
                 channel
                     .send("[guard] Approaching context limit, compacting...")

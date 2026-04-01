@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+pub use crate::config::LLMConfig;
 use crate::core::task::{BackgroundManager, TaskManager};
 use crate::core::team::TeammateManager;
 use crate::core::todo::TodoManager;
@@ -37,15 +38,6 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: String,
-}
-
-/// LLM provider configuration
-#[derive(Clone)]
-pub struct LLMConfig {
-    pub model: String,
-    pub base_url: String,
-    pub api_key: String,
-    pub context_window: usize,
 }
 
 /// Top-level configuration

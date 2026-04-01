@@ -12,14 +12,13 @@ use crate::core::store::{
 use crate::core::task::{BackgroundManager, TaskManager};
 use crate::core::todo::TodoManager;
 use crate::frontend::{Channel, SilentChannel};
+use crate::config::tuning;
 use crate::intelligence::Intelligence;
 use crate::intelligence::manager::SharedAgents;
 
-const MAX_TURNS: usize = 30;
-
 /// Run an agent with isolated context
 ///
-/// Creates a fresh message history, runs a CoT loop up to `MAX_TURNS`,
+/// Creates a fresh message history, runs a CoT loop up to `max_subagent_turns`,
 /// and returns only the final assistant text. The agent's full history
 /// is discarded — the caller sees just the summary.
 ///
@@ -97,7 +96,7 @@ pub fn run_subagent(
             &channel,
             &http,
             &CotOptions {
-                max_turns: Some(MAX_TURNS),
+                max_turns: Some(tuning().max_subagent_turns),
                 nag_reminder: false,
                 flush_on_done: false,
             },

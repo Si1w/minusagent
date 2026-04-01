@@ -9,11 +9,11 @@ use ratatui::widgets::*;
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::Duration;
 
+use crate::config::tuning;
 use crate::frontend::{Channel, UserMessage};
 
 const BANNER: &str = "\
 Welcome. Type a message to chat, or use / commands.\n\n";
-const MAX_OUTPUT_BYTES: usize = 100_000;
 
 struct TuiState {
     output: String,
@@ -27,8 +27,9 @@ struct TuiState {
 impl TuiState {
     /// Trim output buffer from the front if it exceeds the max size
     fn trim_output(&mut self) {
-        if self.output.len() > MAX_OUTPUT_BYTES {
-            let cut = self.output.len() - MAX_OUTPUT_BYTES;
+        let max_bytes = tuning().cli_max_output_bytes;
+        if self.output.len() > max_bytes {
+            let cut = self.output.len() - max_bytes;
             // Find a char boundary after the cut point
             let safe = self.output.ceil_char_boundary(cut);
             self.output.drain(..safe);

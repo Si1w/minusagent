@@ -6,9 +6,8 @@ use crate::core::agent::Agent;
 use crate::core::store::SharedStore;
 use crate::frontend::Channel;
 use crate::resilience::classify::{FailoverReason, classify_failure};
+use crate::config::tuning;
 use crate::resilience::profile::ProfileManager;
-
-const MAX_OVERFLOW_COMPACTION: usize = 2;
 
 /// Three-layer resilient runner wrapping `Agent::run()`
 ///
@@ -26,16 +25,6 @@ impl ResilienceRunner {
             profiles,
             fallback_models,
         }
-    }
-
-    /// Load fallback models from `LLM_FALLBACK_MODELS` env var (comma-separated)
-    pub fn fallback_models_from_env() -> Vec<String> {
-        std::env::var("LLM_FALLBACK_MODELS")
-            .unwrap_or_default()
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
     }
 
     /// Run the agent with three-layer resilience
@@ -156,7 +145,7 @@ impl ResilienceRunner {
     ) -> Result<Option<usize>> {
         let agent = Agent;
 
-        for attempt in 0..MAX_OVERFLOW_COMPACTION {
+        for attempt in 0..tuning().max_overflow_compaction {
             // LAYER 3: Agent::run() — the tool-use loop
             match agent.run(store, channel, http).await {
                 Ok(tokens) => return Ok(tokens),
@@ -164,7 +153,7 @@ impl ResilienceRunner {
                     let reason = classify_failure(&e);
 
                     if reason == FailoverReason::Overflow
-                        && attempt + 1 < MAX_OVERFLOW_COMPACTION
+                        && attempt + 1 < tuning().max_overflow_compaction
                     {
                         log::warn!(
                             "resilience: overflow on attempt {}, compacting history",

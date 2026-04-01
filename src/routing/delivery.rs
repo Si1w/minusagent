@@ -8,10 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Duration;
 
-const BACKOFF_MS: [u64; 4] = [5_000, 25_000, 120_000, 600_000];
-const MAX_RETRIES: u32 = 5;
-const SCAN_INTERVAL: Duration = Duration::from_secs(1);
-const DEFAULT_CHUNK_LIMIT: usize = 4096;
+use crate::config::tuning;
 
 /// Async delivery target for outbound messages
 #[async_trait::async_trait]
@@ -153,12 +150,12 @@ impl DeliveryQueue {
     }
 
     /// Record delivery failure: increment retry, schedule backoff, or
-    /// move to `failed/` after MAX_RETRIES
+    /// move to `failed/` after max retries
     pub fn fail(&self, id: &str, error: &str) -> Result<()> {
         let mut entry = self.read_entry(id)?;
         entry.retry_count += 1;
         entry.last_error = Some(error.to_string());
-        if entry.retry_count >= MAX_RETRIES {
+        if entry.retry_count >= tuning().delivery_max_retries {
             return self.move_to_failed(id);
         }
         let backoff = compute_backoff_ms(entry.retry_count);
@@ -336,7 +333,7 @@ pub fn spawn(
     }
 
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(SCAN_INTERVAL);
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
         let mut total_attempted: u64 = 0;
         let mut total_succeeded: u64 = 0;
         let mut total_failed: u64 = 0;
@@ -429,9 +426,10 @@ fn compute_backoff_ms(retry_count: u32) -> u64 {
     if retry_count == 0 {
         return 0;
     }
+    let backoff = &tuning().delivery_backoff_ms;
     let idx =
-        std::cmp::min(retry_count as usize - 1, BACKOFF_MS.len() - 1);
-    let base = BACKOFF_MS[idx];
+        std::cmp::min(retry_count as usize - 1, backoff.len() - 1);
+    let base = backoff[idx];
     let range = base / 5;
     if range == 0 {
         return base;
@@ -476,7 +474,7 @@ fn platform_limit(channel: &str) -> usize {
     match channel {
         "discord" => 2000,
         "telegram" => 4096,
-        _ => DEFAULT_CHUNK_LIMIT,
+        _ => tuning().delivery_chunk_limit,
     }
 }
 
@@ -542,7 +540,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let q = DeliveryQueue::new(dir.path()).unwrap();
         let id = q.enqueue("bg", "", "test").unwrap();
-        for _ in 0..MAX_RETRIES {
+        for _ in 0..tuning().delivery_max_retries {
             q.fail(&id, "err").unwrap();
         }
         assert_eq!(q.load_pending().unwrap().len(), 0);
@@ -590,9 +588,10 @@ mod tests {
     fn test_compute_backoff_bounds() {
         for retry in 1..=5 {
             let backoff = compute_backoff_ms(retry);
+            let backoff_schedule = &tuning().delivery_backoff_ms;
             let idx =
-                std::cmp::min(retry as usize - 1, BACKOFF_MS.len() - 1);
-            let base = BACKOFF_MS[idx];
+                std::cmp::min(retry as usize - 1, backoff_schedule.len() - 1);
+            let base = backoff_schedule[idx];
             let min = base - base / 5;
             let max = base + base / 5;
             assert!(
@@ -633,6 +632,6 @@ mod tests {
     fn test_platform_limit() {
         assert_eq!(platform_limit("discord"), 2000);
         assert_eq!(platform_limit("telegram"), 4096);
-        assert_eq!(platform_limit("cli"), DEFAULT_CHUNK_LIMIT);
+        assert_eq!(platform_limit("cli"), tuning().delivery_chunk_limit);
     }
 }

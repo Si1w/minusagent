@@ -18,14 +18,12 @@ use crate::core::todo::TodoManager;
 use crate::frontend::SilentChannel;
 use crate::intelligence::Intelligence;
 use crate::intelligence::manager::SharedAgents;
+use crate::config::tuning;
 use crate::scheduler::now_secs;
 
 use tokio::time::Duration;
 
-const MAX_TEAMMATE_TURNS: usize = 50;
 const REQUEST_ID_LEN: usize = 8;
-const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(5);
-const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 // ── Message Bus ──────────────────────────────────────────
 
@@ -767,7 +765,7 @@ async fn teammate_loop(
             &channel,
             &http,
             &CotOptions {
-                max_turns: Some(MAX_TEAMMATE_TURNS),
+                max_turns: Some(tuning().max_teammate_turns),
                 nag_reminder: false,
                 flush_on_done: false,
             },
@@ -811,12 +809,13 @@ async fn idle_poll(
     store: &mut SharedStore,
     wake_rx: &mut mpsc::Receiver<()>,
 ) -> bool {
+    let t = tuning();
     let deadline =
-        tokio::time::Instant::now() + IDLE_TIMEOUT;
+        tokio::time::Instant::now() + Duration::from_secs(t.idle_timeout_secs);
 
     loop {
         let poll = tokio::time::timeout(
-            IDLE_POLL_INTERVAL,
+            Duration::from_secs(t.idle_poll_interval_secs),
             wake_rx.recv(),
         )
         .await;

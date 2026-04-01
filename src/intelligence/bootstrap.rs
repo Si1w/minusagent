@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::config::tuning;
 use crate::intelligence::PromptMode;
-
-const MAX_FILE_CHARS: usize = 20_000;
-const MAX_TOTAL_CHARS: usize = 150_000;
 
 /// Bootstrap file names loaded at agent startup
 pub const BOOTSTRAP_FILES: &[&str] = &[
@@ -58,12 +56,12 @@ impl BootstrapLoader {
                 _ => continue,
             };
 
-            let remaining = MAX_TOTAL_CHARS.saturating_sub(total);
+            let remaining = tuning().bootstrap_max_total_chars.saturating_sub(total);
             if remaining == 0 {
                 break;
             }
 
-            let budget = remaining.min(MAX_FILE_CHARS);
+            let budget = remaining.min(tuning().bootstrap_max_file_chars);
             let truncated = Self::truncate(&raw, budget);
             total += truncated.len();
             result.insert(name.to_string(), truncated);

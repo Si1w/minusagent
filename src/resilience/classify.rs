@@ -20,10 +20,11 @@ pub enum FailoverReason {
 impl FailoverReason {
     /// Default cooldown in seconds for this failure category
     pub fn default_cooldown_secs(&self) -> u64 {
+        let t = crate::config::tuning();
         match self {
-            Self::Auth | Self::Billing => 300,
-            Self::RateLimit => 120,
-            Self::Timeout => 60,
+            Self::Auth | Self::Billing => t.auth_cooldown_secs,
+            Self::RateLimit => t.rate_limit_cooldown_secs,
+            Self::Timeout => t.timeout_cooldown_secs,
             Self::Overflow | Self::Unknown => 0,
         }
     }

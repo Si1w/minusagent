@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::time::Duration;
 
+use crate::config::tuning;
+
 // ── Task Graph ──────────────────────────────────────────────
 
 /// Task status in the dependency graph
@@ -321,10 +323,6 @@ impl TaskManager {
 
 // ── Background Tasks ────────────────────────────────────────
 
-const BG_TIMEOUT: Duration = Duration::from_secs(300);
-const NOTIFICATION_MAX_LEN: usize = 500;
-const OUTPUT_MAX_LEN: usize = 50_000;
-
 /// Status of a background task
 #[derive(Debug, Clone, PartialEq)]
 pub enum BackgroundStatus {
@@ -399,8 +397,10 @@ impl BackgroundManager {
         let tid = task_id.clone();
 
         tokio::spawn(async move {
+            let t = tuning();
+            let bg_timeout = Duration::from_secs(t.bg_timeout_secs);
             let result = tokio::time::timeout(
-                BG_TIMEOUT,
+                bg_timeout,
                 Command::new("sh").arg("-c").arg(&cmd).output(),
             )
             .await;
@@ -424,14 +424,14 @@ impl BackgroundManager {
                 Err(_) => (
                     format!(
                         "Error: Timeout ({}s)",
-                        BG_TIMEOUT.as_secs()
+                        bg_timeout.as_secs()
                     ),
                     true,
                 ),
             };
 
-            let output = truncate(&output, OUTPUT_MAX_LEN);
-            let notification = truncate(&output, NOTIFICATION_MAX_LEN);
+            let output = truncate(&output, t.output_max_len);
+            let notification = truncate(&output, t.notification_max_len);
 
             let mut inner = inner.lock().unwrap();
             if let Some(task) = inner.tasks.get_mut(&tid) {

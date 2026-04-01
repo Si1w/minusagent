@@ -9,10 +9,8 @@ use tokio::time::Duration;
 
 use crate::core::store::LLMConfig;
 use crate::routing::delivery::DeliveryHandle;
+use crate::config::tuning;
 use crate::scheduler::{now_secs, run_single_turn};
-
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
-const AUTO_DISABLE_THRESHOLD: u32 = 5;
 
 /// A scheduled job definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -306,7 +304,7 @@ impl CronService {
 
         if status == "error" {
             job.consecutive_errors += 1;
-            if job.consecutive_errors >= AUTO_DISABLE_THRESHOLD {
+            if job.consecutive_errors >= tuning().cron_auto_disable_threshold {
                 job.enabled = false;
                 let msg = format!(
                     "Job '{}' auto-disabled after {} consecutive errors: {}",
@@ -433,7 +431,7 @@ pub fn spawn(
     log::info!("Cron service started with {} jobs", svc.jobs.len());
 
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(POLL_INTERVAL);
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
                 _ = tick.tick() => {

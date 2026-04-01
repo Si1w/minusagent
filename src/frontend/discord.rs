@@ -10,6 +10,7 @@ use tokio::sync::{Mutex, oneshot};
 use tokio::time::{Duration, Instant, interval_at};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+use crate::config::tuning;
 use crate::frontend::gateway::Gateway;
 use crate::frontend::utils::chunk_text;
 use crate::frontend::{Channel, UserMessage};
@@ -19,7 +20,6 @@ const GATEWAY_URL: &str =
     "wss://gateway.discord.gg/?v=10&encoding=json";
 const API_BASE: &str = "https://discord.com/api/v10";
 const MAX_MSG_LEN: usize = 2000;
-const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
 /// Shared map for pending bash confirmations, keyed by Discord channel ID
 pub type PendingConfirms =
@@ -293,7 +293,7 @@ pub async fn start_gateway(
                     log::error!(
                         "Discord: connection failed: {e}"
                     );
-                    tokio::time::sleep(RECONNECT_DELAY).await;
+                    tokio::time::sleep(Duration::from_secs(tuning().reconnect_delay_secs)).await;
                     continue;
                 }
             };
@@ -327,7 +327,7 @@ pub async fn start_gateway(
             let msg =
                 WsMessage::Text(payload.to_string().into());
             if write.lock().await.send(msg).await.is_err() {
-                tokio::time::sleep(RECONNECT_DELAY).await;
+                tokio::time::sleep(Duration::from_secs(tuning().reconnect_delay_secs)).await;
                 continue;
             }
             log::info!(
@@ -338,7 +338,7 @@ pub async fn start_gateway(
             let msg =
                 WsMessage::Text(payload.to_string().into());
             if write.lock().await.send(msg).await.is_err() {
-                tokio::time::sleep(RECONNECT_DELAY).await;
+                tokio::time::sleep(Duration::from_secs(tuning().reconnect_delay_secs)).await;
                 continue;
             }
 
@@ -397,7 +397,7 @@ pub async fn start_gateway(
                 resume_session_id = None;
                 resume_url = None;
                 seq.store(-1, Ordering::Relaxed);
-                tokio::time::sleep(RECONNECT_DELAY).await;
+                tokio::time::sleep(Duration::from_secs(tuning().reconnect_delay_secs)).await;
                 continue;
             }
         }
@@ -613,7 +613,7 @@ pub async fn start_gateway(
         log::info!(
             "Discord: disconnected, reconnecting..."
         );
-        tokio::time::sleep(RECONNECT_DELAY).await;
+        tokio::time::sleep(Duration::from_secs(tuning().reconnect_delay_secs)).await;
     }
 }
 
