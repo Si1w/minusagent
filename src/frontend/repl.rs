@@ -186,15 +186,19 @@ async fn dispatch(
         // ── LLM ──
 
         Cmd::Llm { action: None } => {
-            match config::list_llm_models() {
-                Ok(models) if models.is_empty() => {
+            match config::list_llm_profiles() {
+                Ok(profiles) if profiles.is_empty() => {
                     cli.send("No LLM profiles.").await;
                 }
-                Ok(models) => {
-                    let mut lines = vec!["LLM Profiles:".to_string()];
-                    for (i, m) in models.iter().enumerate() {
-                        let tag = if i == 0 { " (primary)" } else { "" };
-                        lines.push(format!("  {m}{tag}"));
+                Ok(profiles) => {
+                    let mut lines = vec![format!("LLM Profiles ({}):", profiles.len())];
+                    for (i, p) in profiles.iter().enumerate() {
+                        let tag = if i == 0 { " ← primary" } else { "" };
+                        lines.push(format!(
+                            "  {} │ {} │ ctx={}k{}",
+                            p.model, p.base_url.trim_end_matches('/'),
+                            p.context_window / 1000, tag,
+                        ));
                     }
                     cli.send(&lines.join("\n")).await;
                 }

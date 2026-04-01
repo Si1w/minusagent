@@ -338,8 +338,8 @@ pub fn set_primary_llm(model: &str) -> anyhow::Result<()> {
     })
 }
 
-/// List all LLM model names, primary first
-pub fn list_llm_models() -> anyhow::Result<Vec<String>> {
+/// List all LLM profiles, primary first
+pub fn list_llm_profiles() -> anyhow::Result<Vec<LLMConfig>> {
     let root = read_raw()?;
     let arr = root
         .get("llm")
@@ -347,6 +347,6 @@ pub fn list_llm_models() -> anyhow::Result<Vec<String>> {
         .ok_or_else(|| anyhow::anyhow!("missing or invalid `llm` array in {CONFIG_PATH}"))?;
     Ok(arr
         .iter()
-        .filter_map(|v| v.get("model").and_then(|m| m.as_str()).map(String::from))
+        .filter_map(|v| serde_json::from_value(v.clone()).ok())
         .collect())
 }
