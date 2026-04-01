@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use anyhow::{Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -264,13 +265,13 @@ impl LLMConfig {
 // ── LLM profile management (persists to config.json) ──────
 
 /// Read config.json as raw JSON value
-fn read_raw() -> anyhow::Result<serde_json::Value> {
+fn read_raw() -> Result<serde_json::Value> {
     let raw = std::fs::read_to_string(CONFIG_PATH)?;
     Ok(serde_json::from_str(&raw)?)
 }
 
 /// Write raw JSON value back to config.json
-fn write_raw(value: &serde_json::Value) -> anyhow::Result<()> {
+fn write_raw(value: &serde_json::Value) -> Result<()> {
     let pretty = serde_json::to_string_pretty(value)?;
     std::fs::write(CONFIG_PATH, pretty)?;
     Ok(())
@@ -278,22 +279,22 @@ fn write_raw(value: &serde_json::Value) -> anyhow::Result<()> {
 
 /// Read-modify-write the `llm` array in config.json
 fn update_llm_array(
-    f: impl FnOnce(&mut Vec<serde_json::Value>) -> anyhow::Result<()>,
-) -> anyhow::Result<()> {
+    f: impl FnOnce(&mut Vec<serde_json::Value>) -> Result<()>,
+) -> Result<()> {
     let mut root = read_raw()?;
     let arr = root
         .get_mut("llm")
         .and_then(|v| v.as_array_mut())
-        .ok_or_else(|| anyhow::anyhow!("missing or invalid `llm` array in {CONFIG_PATH}"))?;
+        .ok_or_else(|| anyhow!("missing or invalid `llm` array in {CONFIG_PATH}"))?;
     f(arr)?;
     write_raw(&root)
 }
 
 /// Find a model's index in the llm array by name
-fn find_model(arr: &[serde_json::Value], model: &str) -> anyhow::Result<usize> {
+fn find_model(arr: &[serde_json::Value], model: &str) -> Result<usize> {
     arr.iter()
         .position(|v| v.get("model").and_then(|m| m.as_str()) == Some(model))
-        .ok_or_else(|| anyhow::anyhow!("model {model:?} not found"))
+        .ok_or_else(|| anyhow!("model {model:?} not found"))
 }
 
 /// Add an LLM profile to config.json
@@ -301,7 +302,7 @@ fn find_model(arr: &[serde_json::Value], model: &str) -> anyhow::Result<usize> {
 /// # Errors
 ///
 /// Returns error if config.json is unreadable or the `llm` array is missing.
-pub fn add_llm(config: &LLMConfig) -> anyhow::Result<()> {
+pub fn add_llm(config: &LLMConfig) -> Result<()> {
     update_llm_array(|arr| {
         arr.push(serde_json::to_value(config)?);
         Ok(())
@@ -313,10 +314,10 @@ pub fn add_llm(config: &LLMConfig) -> anyhow::Result<()> {
 /// # Errors
 ///
 /// Returns error if the model is not found or it is the only entry.
-pub fn remove_llm(model: &str) -> anyhow::Result<()> {
+pub fn remove_llm(model: &str) -> Result<()> {
     update_llm_array(|arr| {
         let idx = find_model(arr, model)?;
-        anyhow::ensure!(arr.len() > 1, "cannot remove the only LLM profile");
+        ensure!(arr.len() > 1, "cannot remove the only LLM profile");
         arr.remove(idx);
         Ok(())
     })
@@ -327,7 +328,7 @@ pub fn remove_llm(model: &str) -> anyhow::Result<()> {
 /// # Errors
 ///
 /// Returns error if the model is not found.
-pub fn set_primary_llm(model: &str) -> anyhow::Result<()> {
+pub fn set_primary_llm(model: &str) -> Result<()> {
     update_llm_array(|arr| {
         let idx = find_model(arr, model)?;
         if idx != 0 {
@@ -339,12 +340,12 @@ pub fn set_primary_llm(model: &str) -> anyhow::Result<()> {
 }
 
 /// List all LLM profiles, primary first
-pub fn list_llm_profiles() -> anyhow::Result<Vec<LLMConfig>> {
+pub fn list_llm_profiles() -> Result<Vec<LLMConfig>> {
     let root = read_raw()?;
     let arr = root
         .get("llm")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| anyhow::anyhow!("missing or invalid `llm` array in {CONFIG_PATH}"))?;
+        .ok_or_else(|| anyhow!("missing or invalid `llm` array in {CONFIG_PATH}"))?;
     Ok(arr
         .iter()
         .filter_map(|v| serde_json::from_value(v.clone()).ok())
