@@ -11,27 +11,37 @@ Rust agent framework. Everything is a Node (`prep → exec → post`).
 
 ### Configuration
 
-Create a `.env` file in the project root:
+On first run, a `config.json` template is created. Edit it with your LLM provider details:
 
-```env
-LLM_MODEL=gpt-4o
-LLM_BASE_URL=https://api.openai.com/v1/
-LLM_API_KEY=sk-...
-LLM_CONTEXT_WINDOW=128000
-WORKSPACE_DIR=./workspace
+```jsonc
+{
+  "llm": [
+    {
+      "model": "gpt-4o",
+      "base_url": "https://api.openai.com/v1/",
+      "api_key": "$OPENAI_API_KEY",
+      "context_window": 128000
+    }
+  ],
+  "workspace_dir": "./workspace"
+}
 ```
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `LLM_MODEL` | Yes | Default model name |
-| `LLM_BASE_URL` | Yes | OpenAI-compatible API base URL |
-| `LLM_API_KEY` | Yes | API key |
-| `LLM_CONTEXT_WINDOW` | Yes | Max context window size (tokens) |
-| `WORKSPACE_DIR` | No | Workspace root for agent discovery (default: `./workspace`) |
-| `DISCORD_BOT_TOKEN` | No | Discord bot token for `/discord` gateway |
-| `LLM_API_KEY_1`, `LLM_BASE_URL_1`, ... | No | Additional API profiles for resilience failover |
-| `LLM_FALLBACK_MODELS` | No | Comma-separated fallback model names |
-| `RUST_LOG` | No | Log level (`debug`, `info`, `warn`, `error`) |
+String values starting with `$` are resolved as environment variables, so secrets can live in your shell profile instead of the config file. Alternatively, put the literal value directly — `config.json` is gitignored.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `llm` | Yes | Array of LLM profiles. First = primary, rest = auth rotation. |
+| `llm[].model` | Yes | Model name |
+| `llm[].base_url` | Yes | OpenAI-compatible API base URL |
+| `llm[].api_key` | Yes | API key (or `$ENV_VAR` reference) |
+| `llm[].context_window` | Yes | Max context window size (tokens) |
+| `workspace_dir` | No | Workspace root for agent discovery (default: `./workspace`) |
+| `discord_token` | No | Discord bot token for `/discord` gateway (or `$ENV_VAR`) |
+| `fallback_models` | No | Array of fallback model names for resilience |
+| `tuning` | No | Runtime-tunable parameters (all have sensible defaults) |
+
+Manage LLM profiles at runtime with `/llm`, `/llm add`, `/llm rm <model>`, `/llm primary <model>`.
 
 ### Build & Run
 
@@ -91,6 +101,10 @@ workspace/
 | | `/cron stop` | Stop cron service |
 | | `/delivery` | Delivery queue stats |
 | | `/delivery stop` | Stop delivery runner |
+| **Config** | `/llm` | List LLM profiles |
+| | `/llm add` | Add profile (interactive) |
+| | `/llm rm <model>` | Remove profile |
+| | `/llm primary <model>` | Set primary |
 | **Gateways** | `/discord` | Start Discord bot |
 | | `/gateway` | Start WebSocket API gateway |
 | | `/help` | Show commands |
@@ -100,15 +114,15 @@ workspace/
 
 Beyond the CLI TUI, two additional frontends can be started at runtime:
 
-- **Discord** (`/discord`) — Requires `DISCORD_BOT_TOKEN` env var.
+- **Discord** (`/discord`) — Requires `discord_token` in config.json.
 - **WebSocket** (`/gateway`) — JSON-RPC interface for programmatic access. Supports agent registration, binding management, and message dispatch.
 
 All frontends implement the `Channel` trait and can run concurrently.
 
 ## Resilience
 
-When multiple API keys are configured (`LLM_API_KEY_1`, `LLM_API_KEY_2`, ...), the resilience layer provides:
+When multiple LLM profiles are configured in the `llm` array, the resilience layer provides:
 
-- **Profile rotation** — On auth, billing, or rate-limit failures, automatically rotates to the next available API key with category-specific cooldowns.
+- **Profile rotation** — On auth, billing, or rate-limit failures, automatically rotates to the next available profile with category-specific cooldowns.
 - **Overflow recovery** — On context-window overflow, compacts message history and retries.
-- **Fallback models** — If `LLM_FALLBACK_MODELS` is set, tries alternative models when the primary fails.
+- **Fallback models** — If `fallback_models` is set, tries alternative models when the primary fails.
