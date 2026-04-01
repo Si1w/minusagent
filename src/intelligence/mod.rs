@@ -5,7 +5,6 @@ pub mod prompt;
 pub mod skills;
 pub mod utils;
 
-use std::collections::HashMap;
 use std::path::Path;
 
 /// Prompt assembly mode
@@ -36,22 +35,24 @@ use crate::intelligence::skills::{Skill, SkillsManager};
 
 /// Intelligence context for dynamic system prompt assembly
 ///
-/// Loaded once at session creation. System prompt is rebuilt each turn.
+/// Static layers (identity, tools, skills, bootstrap, channel) are cached at
+/// session creation. Only dynamic layers (memory, runtime) are rebuilt each turn.
 pub struct Intelligence {
     pub memory: MemoryStore,
-    bootstrap_data: HashMap<String, String>,
     skills: Vec<Skill>,
-    /// Identity text from AGENT.md body (Layer 1)
-    identity: String,
     agent_id: String,
     channel: String,
     model: String,
+    mode: PromptMode,
+    /// Cached static prefix (built once in `new()`)
+    static_prefix: String,
 }
 
 impl Intelligence {
     /// Initialize intelligence from a workspace directory
     ///
-    /// Loads bootstrap files and discovers skills once.
+    /// Loads bootstrap files, discovers skills and memory, then caches the
+    /// static prompt prefix for reuse across turns.
     ///
     /// # Arguments
     ///
@@ -76,14 +77,23 @@ impl Intelligence {
         let mut memory = MemoryStore::new(&workspace_dir.join("memory"));
         memory.discover();
 
+        let mode = PromptMode::Full;
+        let static_prefix = prompt::build_static_prefix(
+            mode,
+            &identity,
+            &bootstrap_data,
+            &skills_mgr.skills,
+            &channel,
+        );
+
         Self {
             memory,
-            bootstrap_data,
             skills: skills_mgr.skills,
-            identity,
             agent_id,
             channel,
             model,
+            mode,
+            static_prefix,
         }
     }
 
@@ -92,18 +102,16 @@ impl Intelligence {
         self.skills.iter().find(|s| s.name == name)
     }
 
-    /// Build the system prompt from all loaded layers
+    /// Build the system prompt: cached static prefix + fresh dynamic suffix
     pub fn build_prompt(&self) -> String {
-        prompt::build_system_prompt(
-            PromptMode::Full,
-            &self.identity,
-            &self.bootstrap_data,
-            &self.skills,
+        let dynamic = prompt::build_dynamic_suffix(
+            self.mode,
             &self.memory.entries,
             &self.agent_id,
             &self.model,
             &self.channel,
-        )
+        );
+        prompt::join_prompt(&self.static_prefix, &dynamic)
     }
 }
 

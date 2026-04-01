@@ -10,7 +10,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use crate::config::{AppConfig, LLMConfig, tuning};
+use crate::config::{AppConfig, LLMConfig};
 use crate::core::session::Session;
 use crate::core::store::{Config, Context, SharedStore, SystemState};
 use crate::core::task::{BackgroundManager, TaskManager};
@@ -299,8 +299,6 @@ impl Gateway {
                             lane_lock.clone(),
                             llm_config,
                             system_prompt,
-                            tokio::time::Duration::from_secs(tuning().heartbeat_interval_secs),
-                            tuning().heartbeat_active_hours,
                             self.delivery.clone(),
                             "bg".to_string(),
                             String::new(),

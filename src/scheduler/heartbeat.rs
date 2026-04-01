@@ -1,16 +1,50 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use chrono::{Local, Timelike, Utc};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Duration;
 
+use crate::config::tuning;
 use crate::core::store::LLMConfig;
 use crate::intelligence::memory::MemoryStore;
 use crate::intelligence::prompt::format_memory_content;
+use crate::intelligence::utils::{extract_body, parse_frontmatter};
 use crate::routing::delivery::DeliveryHandle;
 use crate::scheduler::{LANE_SESSION, LaneLock, now_secs, run_single_turn};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Parse heartbeat-specific overrides from HEARTBEAT.md frontmatter
+///
+/// Supported keys:
+/// - `interval`: seconds between runs (e.g. `600`)
+/// - `active_hours`: comma-separated start,end (e.g. `8, 23`)
+///
+/// Returns `(interval, active_hours)` using tuning defaults for missing keys.
+fn parse_heartbeat_config(meta: &HashMap<String, String>) -> (Duration, (u8, u8)) {
+    let interval = meta
+        .get("interval")
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(tuning().heartbeat_interval_secs));
+
+    let active_hours = meta
+        .get("active_hours")
+        .and_then(|v| {
+            let parts: Vec<&str> = v.split(',').collect();
+            if parts.len() == 2 {
+                let s = parts[0].trim().parse::<u8>().ok()?;
+                let e = parts[1].trim().parse::<u8>().ok()?;
+                Some((s, e))
+            } else {
+                None
+            }
+        })
+        .unwrap_or(tuning().heartbeat_active_hours);
+
+    (interval, active_hours)
+}
 
 /// Heartbeat runner status snapshot
 pub struct HeartbeatStatus {
@@ -81,23 +115,41 @@ struct HeartbeatRunner {
     running: bool,
     last_output: String,
     output_count: usize,
+    /// Cached raw content from the last successful read of HEARTBEAT.md
+    cached_content: Option<String>,
 }
 
 impl HeartbeatRunner {
+    /// Read HEARTBEAT.md once, update config and cache content.
+    /// Returns the body text, or None if unreadable/empty.
+    fn refresh_file(&mut self) -> Option<String> {
+        let raw = match std::fs::read_to_string(&self.heartbeat_path) {
+            Ok(c) => c,
+            Err(_) => return None,
+        };
+        let meta = parse_frontmatter(&raw);
+        let (interval, active_hours) = parse_heartbeat_config(&meta);
+        self.interval = interval;
+        self.active_hours = active_hours;
+        let body = extract_body(&raw);
+        if body.trim().is_empty() {
+            self.cached_content = None;
+            return None;
+        }
+        self.cached_content = Some(raw);
+        Some(body)
+    }
+
     /// Check 4 preconditions for running. Lock check is separate in execute().
-    fn should_run(&self) -> (bool, String) {
+    fn should_run(&mut self) -> (bool, String) {
         if !self.heartbeat_path.exists() {
             return (false, "HEARTBEAT.md not found".into());
         }
-        let content = match std::fs::read_to_string(&self.heartbeat_path) {
-            Ok(c) => c,
-            Err(_) => {
-                return (false, "HEARTBEAT.md unreadable".into());
-            }
+        let body = match self.refresh_file() {
+            Some(b) => b,
+            None => return (false, "HEARTBEAT.md body is empty".into()),
         };
-        if content.trim().is_empty() {
-            return (false, "HEARTBEAT.md is empty".into());
-        }
+        let _ = body;
 
         let now = now_secs();
         let elapsed = now - self.last_run_at;
@@ -143,9 +195,9 @@ impl HeartbeatRunner {
 
     /// Build system prompt and instruction for heartbeat turn
     fn build_prompt(&mut self) -> Option<(String, String)> {
-        let instructions =
-            std::fs::read_to_string(&self.heartbeat_path).ok()?;
-        let instructions = instructions.trim().to_string();
+        let raw = self.cached_content.as_ref().cloned()
+            .or_else(|| std::fs::read_to_string(&self.heartbeat_path).ok())?;
+        let instructions = extract_body(&raw);
         if instructions.is_empty() {
             return None;
         }
@@ -267,7 +319,7 @@ impl HeartbeatRunner {
         result
     }
 
-    fn status(&self) -> HeartbeatStatus {
+    fn status(&mut self) -> HeartbeatStatus {
         let now = now_secs();
         let elapsed = if self.last_run_at > 0.0 {
             Some(now - self.last_run_at)
@@ -304,14 +356,16 @@ impl HeartbeatRunner {
 
 /// Spawn a heartbeat task and return its handle
 ///
+/// Interval and active hours are read from HEARTBEAT.md frontmatter,
+/// falling back to tuning defaults. The file is re-read on each poll
+/// so changes take effect without restart.
+///
 /// # Arguments
 ///
 /// * `workspace_dir` - Agent workspace directory (contains HEARTBEAT.md)
 /// * `lane_lock` - Shared lane lock with the session
 /// * `llm_config` - LLM provider configuration
 /// * `identity` - Agent identity text for system prompt
-/// * `interval` - Minimum interval between heartbeat runs
-/// * `active_hours` - Active hours range (start, end), e.g. (9, 22)
 /// * `delivery` - Delivery handle for background output
 /// * `delivery_channel` - Outbound channel for delivery (e.g. "bg", "discord")
 /// * `delivery_to` - Outbound target (e.g. Discord channel ID)
@@ -320,8 +374,6 @@ pub fn spawn(
     lane_lock: LaneLock,
     llm_config: LLMConfig,
     identity: String,
-    interval: Duration,
-    active_hours: (u8, u8),
     delivery: DeliveryHandle,
     delivery_channel: String,
     delivery_to: String,
@@ -330,7 +382,23 @@ pub fn spawn(
     let mut memory = MemoryStore::new(&workspace_dir.join("memory"));
     memory.discover();
 
-    log::info!("Heartbeat started for {}", heartbeat_path.display());
+    let (interval, active_hours) = std::fs::read_to_string(&heartbeat_path)
+        .ok()
+        .map(|raw| parse_heartbeat_config(&parse_frontmatter(&raw)))
+        .unwrap_or_else(|| {
+            (
+                Duration::from_secs(tuning().heartbeat_interval_secs),
+                tuning().heartbeat_active_hours,
+            )
+        });
+
+    log::info!(
+        "Heartbeat started for {} (interval={}s, hours={}:00-{}:00)",
+        heartbeat_path.display(),
+        interval.as_secs(),
+        active_hours.0,
+        active_hours.1,
+    );
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<HeartbeatCmd>(8);
 
@@ -345,10 +413,11 @@ pub fn spawn(
         delivery_to,
         interval,
         active_hours,
-        last_run_at: 0.0,
+        last_run_at: now_secs(),
         running: false,
         last_output: String::new(),
         output_count: 0,
+        cached_content: None,
     };
 
     tokio::spawn(async move {
@@ -399,12 +468,13 @@ mod tests {
             delivery: DeliveryHandle::noop(),
             delivery_channel: "bg".into(),
             delivery_to: String::new(),
-            interval: Duration::from_secs(crate::config::tuning().heartbeat_interval_secs),
-            active_hours: crate::config::tuning().heartbeat_active_hours,
+            interval: Duration::from_secs(tuning().heartbeat_interval_secs),
+            active_hours: tuning().heartbeat_active_hours,
             last_run_at: 0.0,
             running: false,
             last_output: String::new(),
             output_count: 0,
+            cached_content: None,
         }
     }
 
@@ -429,9 +499,36 @@ mod tests {
 
     #[test]
     fn test_should_run_no_file() {
-        let runner = test_runner();
+        let mut runner = test_runner();
         let (ok, reason) = runner.should_run();
         assert!(!ok);
         assert!(reason.contains("not found"));
+    }
+
+    #[test]
+    fn test_parse_heartbeat_config_defaults() {
+        let meta = HashMap::new();
+        let (interval, hours) = parse_heartbeat_config(&meta);
+        assert_eq!(interval.as_secs(), tuning().heartbeat_interval_secs);
+        assert_eq!(hours, tuning().heartbeat_active_hours);
+    }
+
+    #[test]
+    fn test_parse_heartbeat_config_overrides() {
+        let mut meta = HashMap::new();
+        meta.insert("interval".into(), "600".into());
+        meta.insert("active_hours".into(), "8, 23".into());
+        let (interval, hours) = parse_heartbeat_config(&meta);
+        assert_eq!(interval.as_secs(), 600);
+        assert_eq!(hours, (8, 23));
+    }
+
+    #[test]
+    fn test_parse_heartbeat_config_partial() {
+        let mut meta = HashMap::new();
+        meta.insert("interval".into(), "300".into());
+        let (interval, hours) = parse_heartbeat_config(&meta);
+        assert_eq!(interval.as_secs(), 300);
+        assert_eq!(hours, tuning().heartbeat_active_hours);
     }
 }

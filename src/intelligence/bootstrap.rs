@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::tuning;
 use crate::intelligence::PromptMode;
+use crate::intelligence::utils::extract_body;
 
 /// Bootstrap file names loaded at agent startup
 pub const BOOTSTRAP_FILES: &[&str] = &[
@@ -71,7 +72,8 @@ impl BootstrapLoader {
     }
 
     fn load_file(&self, name: &str) -> Option<String> {
-        std::fs::read_to_string(self.workspace_dir.join(name)).ok()
+        let raw = std::fs::read_to_string(self.workspace_dir.join(name)).ok()?;
+        Some(extract_body(&raw))
     }
 
     fn truncate(content: &str, max_bytes: usize) -> String {
