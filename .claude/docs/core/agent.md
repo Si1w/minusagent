@@ -6,7 +6,7 @@ description: Stateless CoT agent
 
 Stateless chain-of-thought loop. Does not own SharedStore or Channel — receives both per call.
 
-`Agent::run(store, channel, http)`:
+`Agent::run(store, channel, http, interrupted)`:
 
 1. Call LLMCall (Node) → get streaming response with `content` and/or `tool_calls`.
 2. If `tool_calls` present → dispatch each tool via `dispatch_tool()` → loop to 1.

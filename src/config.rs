@@ -94,6 +94,10 @@ pub struct Tuning {
     // ── Routing ──
     /// Default agent ID for unbound sessions
     pub default_agent_id: String,
+
+    // ── Logging ──
+    /// Log level: error, warn, info, debug, trace (overridden by `RUST_LOG` env var)
+    pub log_level: String,
 }
 
 impl Default for Tuning {
@@ -133,6 +137,8 @@ impl Default for Tuning {
             cron_auto_disable_threshold: 5,
 
             default_agent_id: "mandeven".into(),
+
+            log_level: "info".into(),
         }
     }
 }

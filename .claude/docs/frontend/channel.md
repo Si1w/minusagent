@@ -7,11 +7,12 @@ description: Channel trait and frontends
 Async trait for frontend communication. All frontends implement this.
 
 ```rust
-async fn receive() -> Option<UserMessage>   // get user input
-async fn send(text)                         // send output
-async fn confirm(command) -> bool           // bash confirmation (y/n)
-async fn on_stream_chunk(chunk)             // streaming LLM output
-async fn flush()                            // finalize buffered stream content
+async fn receive() -> Option<UserMessage>          // get user input
+async fn send(text)                                // send output
+async fn confirm(command) -> bool                  // bash confirmation (y/n)
+async fn can_use_tool(tool, args) -> bool          // tool permission check (default: delegates to confirm)
+async fn on_stream_chunk(chunk)                    // streaming LLM output
+async fn flush()                                   // finalize buffered stream content
 ```
 
 ## UserMessage
