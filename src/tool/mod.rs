@@ -1,6 +1,7 @@
 mod exec;
 mod search;
 mod schema;
+mod web;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,15 +9,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::Value;
-use tokio::process::Command;
-use tokio::time::Duration;
 
 use crate::core::agent::run_subagent;
 use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore};
-use crate::config::tuning;
 use crate::frontend::Channel;
 use crate::intelligence::manager::normalize_agent_id;
+use crate::scheduler::cron::{CronJob, Payload, ScheduleConfig};
 use crate::team::{BackgroundStatus, TaskStatus, TodoItem, TodoWrite, WorktreeStatus};
 
 pub use schema::all_tools;
@@ -79,9 +78,19 @@ pub async fn dispatch_tool(
                 return Ok(true);
             }
 
+            let disable_sandbox = args
+                .get("dangerously_disable_sandbox")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let timeout_secs = args
+                .get("timeout")
+                .and_then(|v| v.as_u64());
             let node = exec::BashExec {
                 call_id: call_id.clone(),
                 command,
+                sandbox: !disable_sandbox,
+                timeout_secs,
+                current_dir: None,
             };
             if let Err(e) = node.run(store).await {
                 push_tool_result(
@@ -238,10 +247,7 @@ pub async fn dispatch_tool(
                 .unwrap_or_default()
                 .to_string();
 
-            let dangerous =
-                ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"];
-            let blocked = dangerous.iter().any(|p| command.contains(p));
-            if blocked {
+            if exec::is_dangerous_command(&command) {
                 push_tool_result(
                     store,
                     &call_id,
@@ -967,49 +973,22 @@ pub async fn dispatch_tool(
                                         .into(),
                                 );
                             } else {
-                                let bash_timeout = Duration::from_secs(tuning().bash_timeout_secs);
-                                let result =
-                                    tokio::time::timeout(
-                                        bash_timeout,
-                                        Command::new("sh")
-                                            .arg("-c")
-                                            .arg(&command)
-                                            .current_dir(
-                                                &entry.path,
-                                            )
-                                            .output(),
-                                    )
-                                    .await;
-                                let text = match result {
-                                    Ok(Ok(out)) => {
-                                        let stdout =
-                                            String::from_utf8_lossy(
-                                                &out.stdout,
-                                            );
-                                        let stderr =
-                                            String::from_utf8_lossy(
-                                                &out.stderr,
-                                            );
-                                        if out.status.success() {
-                                            stdout.to_string()
-                                        } else {
-                                            format!(
-                                                "stdout:\n{stdout}\n\
-                                                 stderr:\n{stderr}"
-                                            )
-                                        }
-                                    }
-                                    Ok(Err(e)) => {
-                                        format!("Error: {e}")
-                                    }
-                                    Err(_) => format!(
-                                        "Error: timeout ({}s)",
-                                        bash_timeout.as_secs()
+                                let node = exec::BashExec {
+                                    call_id: call_id.clone(),
+                                    command,
+                                    sandbox: true,
+                                    timeout_secs: None,
+                                    current_dir: Some(
+                                        entry.path.clone().into(),
                                     ),
                                 };
-                                push_tool_result(
-                                    store, &call_id, text,
-                                );
+                                if let Err(e) = node.run(store).await {
+                                    push_tool_result(
+                                        store,
+                                        &call_id,
+                                        format!("Error: {e}"),
+                                    );
+                                }
                             }
                         }
                         Some(_) => push_tool_result(
@@ -1040,6 +1019,160 @@ pub async fn dispatch_tool(
                 }
             }
         }
+        "web_fetch" => {
+            let url = args["url"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let max_length = args
+                .get("max_length")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            let node = web::WebFetch {
+                call_id: call_id.clone(),
+                url,
+                max_length,
+            };
+            if let Err(e) = node.run(store).await {
+                push_tool_result(
+                    store,
+                    &call_id,
+                    format!("Error: {e}"),
+                );
+            }
+        }
+        "web_search" => {
+            let query = args["query"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let node = web::WebSearch {
+                call_id: call_id.clone(),
+                query,
+            };
+            if let Err(e) = node.run(store).await {
+                push_tool_result(
+                    store,
+                    &call_id,
+                    format!("Error: {e}"),
+                );
+            }
+        }
+        "plan_mode" => {
+            let active = args["active"].as_bool().unwrap_or(false);
+            store.state.plan_mode = active;
+            let status = if active {
+                "Plan mode ON — research and plan only, no execution."
+            } else {
+                "Plan mode OFF — resuming normal execution."
+            };
+            push_tool_result(store, &call_id, status.into());
+        }
+        "cron_list" => {
+            let Some(handle) = &store.state.cron else {
+                push_tool_result(store, &call_id, "Error: cron service not available".into());
+                return Ok(true);
+            };
+            let jobs = handle.list_jobs().await;
+            if jobs.is_empty() {
+                push_tool_result(store, &call_id, "No cron jobs.".into());
+            } else {
+                let mut output = String::from("Cron jobs:\n");
+                for j in &jobs {
+                    let status = if j.enabled { "enabled" } else { "disabled" };
+                    output.push_str(&format!(
+                        "  {} [{}] {} ({}) errors={} next={}\n",
+                        j.id, status, j.name, j.kind, j.errors, j.next_run,
+                    ));
+                }
+                push_tool_result(store, &call_id, output);
+            }
+        }
+        "cron_create" => {
+            let Some(handle) = &store.state.cron else {
+                push_tool_result(store, &call_id, "Error: cron service not available".into());
+                return Ok(true);
+            };
+            let id = args["id"].as_str().unwrap_or_default().to_string();
+            let name = args["name"].as_str().unwrap_or_default().to_string();
+            let schedule_kind = args["schedule_kind"]
+                .as_str()
+                .unwrap_or("every")
+                .to_string();
+            let message = args["message"].as_str().unwrap_or_default().to_string();
+            let payload_kind = args
+                .get("payload_kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("agent_turn");
+            let channel_name = args
+                .get("channel")
+                .and_then(|v| v.as_str())
+                .unwrap_or("bg")
+                .to_string();
+            let delete_after_run = args
+                .get("delete_after_run")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let payload = if payload_kind == "system_event" {
+                Payload {
+                    kind: "system_event".into(),
+                    message: String::new(),
+                    text: message,
+                }
+            } else {
+                Payload {
+                    kind: "agent_turn".into(),
+                    message,
+                    text: String::new(),
+                }
+            };
+
+            let schedule = ScheduleConfig {
+                kind: schedule_kind,
+                expr: args
+                    .get("cron_expr")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                at: args
+                    .get("at")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                every_seconds: args
+                    .get("every_seconds")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(3600),
+                anchor: String::new(),
+            };
+
+            let job = CronJob {
+                id,
+                name,
+                enabled: true,
+                schedule,
+                payload,
+                channel: channel_name,
+                to: String::new(),
+                delete_after_run,
+                consecutive_errors: 0,
+                last_run_at: 0.0,
+                next_run_at: 0.0,
+            };
+
+            let result = handle.create_job(job).await;
+            push_tool_result(store, &call_id, result);
+        }
+        "cron_delete" => {
+            let Some(handle) = &store.state.cron else {
+                push_tool_result(store, &call_id, "Error: cron service not available".into());
+                return Ok(true);
+            };
+            let job_id = args["job_id"].as_str().unwrap_or_default();
+            let result = handle.delete_job(job_id).await;
+            push_tool_result(store, &call_id, result);
+        }
         _ => return Ok(false),
     }
 
@@ -1066,6 +1199,9 @@ mod tests {
         let node = exec::BashExec {
             call_id: "call_123".into(),
             command: "echo hello".into(),
+            sandbox: false,
+            timeout_secs: None,
+            current_dir: None,
         };
 
         let prep_res = node.prep(&store).await.expect("prep failed");
@@ -1088,6 +1224,9 @@ mod tests {
         let node = exec::BashExec {
             call_id: "call_456".into(),
             command: "sudo rm -rf /".into(),
+            sandbox: false,
+            timeout_secs: None,
+            current_dir: None,
         };
 
         let result = node.prep(&store).await;
@@ -1125,6 +1264,13 @@ mod tests {
         let test_path = "test_edit_output.txt";
         std::fs::write(test_path, "foo bar baz").unwrap();
 
+        // Must read before edit
+        let read_node = exec::ReadFile {
+            call_id: "r_pre".into(),
+            path: test_path.into(),
+        };
+        read_node.run(&mut store).await.expect("read failed");
+
         let node = exec::EditFile {
             call_id: "e1".into(),
             path: test_path.into(),
@@ -1144,13 +1290,20 @@ mod tests {
         let test_path = "test_edit_notfound.txt";
         std::fs::write(test_path, "some content").unwrap();
 
+        let mut store = SharedStore::test_default();
+        let read_node = exec::ReadFile {
+            call_id: "r_pre".into(),
+            path: test_path.into(),
+        };
+        read_node.run(&mut store).await.unwrap();
+
         let node = exec::EditFile {
             call_id: "e2".into(),
             path: test_path.into(),
             old_string: "nonexistent".into(),
             new_string: "replacement".into(),
         };
-        let result = node.run(&mut SharedStore::test_default()).await;
+        let result = node.run(&mut store).await;
         assert!(result.is_err());
 
         std::fs::remove_file(test_path).ok();
@@ -1161,13 +1314,20 @@ mod tests {
         let test_path = "test_edit_dup.txt";
         std::fs::write(test_path, "aaa aaa").unwrap();
 
+        let mut store = SharedStore::test_default();
+        let read_node = exec::ReadFile {
+            call_id: "r_pre".into(),
+            path: test_path.into(),
+        };
+        read_node.run(&mut store).await.unwrap();
+
         let node = exec::EditFile {
             call_id: "e3".into(),
             path: test_path.into(),
             old_string: "aaa".into(),
             new_string: "bbb".into(),
         };
-        let result = node.run(&mut SharedStore::test_default()).await;
+        let result = node.run(&mut store).await;
         assert!(result.is_err());
 
         std::fs::remove_file(test_path).ok();
@@ -1225,8 +1385,8 @@ mod tests {
 
     #[test]
     fn test_all_tools_excludes_task_for_subagent() {
-        let parent_tools = all_tools(false, false, false, false);
-        let sub_tools = all_tools(true, false, false, false);
+        let parent_tools = all_tools(false, false, false, false, false);
+        let sub_tools = all_tools(true, false, false, false, false);
 
         assert!(parent_tools.iter().any(|t| t.function.name == "task"));
         assert!(!sub_tools.iter().any(|t| t.function.name == "task"));
@@ -1236,8 +1396,8 @@ mod tests {
 
     #[test]
     fn test_all_tools_includes_task_graph_tools() {
-        let without = all_tools(false, false, false, false);
-        let with = all_tools(false, true, false, false);
+        let without = all_tools(false, false, false, false, false);
+        let with = all_tools(false, true, false, false, false);
 
         assert!(!without.iter().any(|t| t.function.name == "task_create"));
         assert!(with.iter().any(|t| t.function.name == "task_create"));
@@ -1248,9 +1408,9 @@ mod tests {
 
     #[test]
     fn test_all_tools_includes_team_tools() {
-        let without = all_tools(false, false, false, false);
-        let with = all_tools(false, false, true, false);
-        let sub_with = all_tools(true, false, true, false);
+        let without = all_tools(false, false, false, false, false);
+        let with = all_tools(false, false, true, false, false);
+        let sub_with = all_tools(true, false, true, false, false);
 
         assert!(
             !without.iter().any(|t| t.function.name == "team_spawn")

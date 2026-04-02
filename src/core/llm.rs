@@ -175,6 +175,7 @@ impl Node for LLMCall {
             store.state.tasks.is_some(),
             store.state.team.is_some(),
             store.state.worktrees.is_some(),
+            store.state.cron.is_some(),
         );
 
         Ok(LLMRequest {
@@ -311,6 +312,8 @@ impl Node for LLMCall {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::core::store::{Config, Context, LLMConfig, SystemState};
     use crate::team::{BackgroundManager, TodoManager};
@@ -352,6 +355,9 @@ mod tests {
                 worktrees: None,
                 tool_policy: crate::routing::protocol::ToolPolicy::default(),
                 idle_requested: false,
+                plan_mode: false,
+                cron: None,
+                read_file_state: HashMap::new(),
             },
         };
 

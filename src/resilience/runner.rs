@@ -222,6 +222,8 @@ impl ResilienceRunner {
 mod tests {
     use super::*;
     use crate::core::store::{Config, Context, LLMConfig, Message, Role, SystemState};
+    use std::collections::HashMap;
+
     use crate::team::{BackgroundManager, TodoManager};
     use crate::intelligence::manager::SharedAgents;
     use crate::resilience::profile::AuthProfile;
@@ -260,6 +262,9 @@ mod tests {
                 worktrees: None,
                 tool_policy: ToolPolicy::default(),
                 idle_requested: false,
+                plan_mode: false,
+                cron: None,
+                read_file_state: HashMap::new(),
             },
         }
     }
@@ -343,6 +348,9 @@ mod tests {
                 worktrees: None,
                 tool_policy: ToolPolicy::default(),
                 idle_requested: false,
+                plan_mode: false,
+                cron: None,
+                read_file_state: HashMap::new(),
             },
         };
 

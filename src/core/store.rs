@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::time::SystemTime;
+
 use serde::{Deserialize, Serialize};
 
 pub use crate::config::LLMConfig;
@@ -7,6 +10,7 @@ use crate::team::{
 use crate::intelligence::Intelligence;
 use crate::intelligence::manager::SharedAgents;
 use crate::routing::protocol::ToolPolicy;
+use crate::scheduler::cron::CronHandle;
 
 /// LLM-visible conversation state
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +71,12 @@ pub struct SystemState {
     pub tool_policy: ToolPolicy,
     /// Set by the `idle` tool to break out of cot_loop
     pub idle_requested: bool,
+    /// Whether agent is in plan-only mode (no execution, only research/planning)
+    pub plan_mode: bool,
+    /// Cron service handle for managing scheduled jobs
+    pub cron: Option<CronHandle>,
+    /// Tracks files read by read_file: canonical path → mtime at read time
+    pub read_file_state: HashMap<String, SystemTime>,
 }
 
 impl SystemState {
@@ -114,6 +124,9 @@ impl SharedStore {
                 worktrees: None,
                 tool_policy: ToolPolicy::default(),
                 idle_requested: false,
+                plan_mode: false,
+                cron: None,
+                read_file_state: HashMap::new(),
             },
         }
     }

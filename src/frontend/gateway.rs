@@ -33,6 +33,7 @@ impl AppConfig {
         intelligence: Option<Intelligence>,
         agents: SharedAgents,
         workspace_dir: Option<&PathBuf>,
+        cron: Option<CronHandle>,
     ) -> SharedStore {
         let tasks = workspace_dir
             .map(|ws| TaskManager::new(ws.join(".tasks")))
@@ -76,6 +77,9 @@ impl AppConfig {
                 worktrees,
                 tool_policy: ToolPolicy::default(),
                 idle_requested: false,
+                plan_mode: false,
+                cron,
+                read_file_state: HashMap::new(),
             },
         }
     }
@@ -353,12 +357,15 @@ impl Gateway {
                     .as_ref()
                     .map(|i| i.build_prompt())
                     .unwrap_or(system_prompt.clone());
+                let cron_handle =
+                    self.cron_handle.lock().await.clone();
                 let store = self.config.build_store(
                     initial_prompt,
                     model.clone(),
                     intelligence,
                     shared_agents.clone(),
                     ws_dir.as_ref(),
+                    cron_handle,
                 );
 
                 let lane_lock: LaneLock =

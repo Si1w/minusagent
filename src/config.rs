@@ -68,6 +68,10 @@ pub struct Tuning {
     pub glob_max_results: usize,
     /// Max matches returned by grep tool
     pub grep_max_results: usize,
+    /// Max response body length (chars) for web_fetch before truncation
+    pub web_fetch_max_body: usize,
+    /// HTTP timeout for web_fetch / web_search (seconds)
+    pub web_timeout_secs: u64,
 
     // ── Resilience ──
     /// Max overflow compaction attempts
@@ -124,6 +128,8 @@ impl Default for Tuning {
             bootstrap_max_total_chars: 150_000,
             glob_max_results: 500,
             grep_max_results: 200,
+            web_fetch_max_body: 50_000,
+            web_timeout_secs: 30,
 
             max_overflow_compaction: 2,
             auth_cooldown_secs: 300,
