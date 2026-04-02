@@ -2,6 +2,8 @@ use std::sync::{Mutex, OnceLock};
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
 
+use crate::config::tuning;
+
 static LOG_BUFFER: OnceLock<Mutex<Vec<LogEntry>>> = OnceLock::new();
 static LOGGER: TuiLogger = TuiLogger;
 
@@ -30,14 +32,15 @@ pub struct TuiLogger;
 impl TuiLogger {
     /// Initialize the global logger
     ///
-    /// Log level is controlled by `RUST_LOG` env var (default: `info`).
-    /// Examples: `RUST_LOG=debug cargo run`, `RUST_LOG=error cargo run`
+    /// Priority: `RUST_LOG` env var > `tuning.log_level` config > `info`.
     pub fn init() {
         LOG_BUFFER.get_or_init(|| Mutex::new(Vec::new()));
         let level = std::env::var("RUST_LOG")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(LevelFilter::Info);
+            .unwrap_or_else(|| {
+                tuning().log_level.parse().unwrap_or(LevelFilter::Info)
+            });
         log::set_logger(&LOGGER).ok();
         log::set_max_level(level);
     }
