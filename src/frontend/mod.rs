@@ -2,6 +2,7 @@ pub mod cli;
 pub mod discord;
 pub mod gateway;
 pub mod repl;
+pub mod stdio;
 pub mod utils;
 
 /// A message received from the user
@@ -27,6 +28,18 @@ pub trait Channel: Send + Sync {
 
     /// Ask user to confirm a command before execution
     async fn confirm(&self, command: &str) -> bool;
+
+    /// Ask user to approve a specific tool invocation
+    ///
+    /// Default delegates to `confirm()`. Protocol-aware channels
+    /// override this to send structured `ToolRequest` events.
+    async fn can_use_tool(
+        &self,
+        tool: &str,
+        args: &serde_json::Value,
+    ) -> bool {
+        self.confirm(&format!("{tool}: {args}")).await
+    }
 
     /// Stream a chunk of LLM response to the user
     async fn on_stream_chunk(&self, chunk: &str);

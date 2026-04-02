@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use anyhow::Result;
 
@@ -41,6 +42,7 @@ impl ResilienceRunner {
         store: &mut SharedStore,
         channel: &Arc<dyn Channel>,
         http: &reqwest::Client,
+        interrupted: &Option<Arc<AtomicBool>>,
     ) -> Result<Option<usize>> {
         // Save original LLM config for restoration
         let original_api_key = store.state.config.llm.api_key.clone();
@@ -49,7 +51,7 @@ impl ResilienceRunner {
 
         // LAYER 1: Auth Rotation
         let result = self
-            .try_with_profiles(store, channel, http, &original_model)
+            .try_with_profiles(store, channel, http, &original_model, interrupted)
             .await;
 
         if let Ok(tokens) = result {
@@ -64,7 +66,7 @@ impl ResilienceRunner {
 
             // Reset profile cooldowns for fallback attempt
             let result = self
-                .try_with_profiles(store, channel, http, fallback_model)
+                .try_with_profiles(store, channel, http, fallback_model, interrupted)
                 .await;
 
             if let Ok(tokens) = result {
@@ -89,6 +91,7 @@ impl ResilienceRunner {
         channel: &Arc<dyn Channel>,
         http: &reqwest::Client,
         model: &str,
+        interrupted: &Option<Arc<AtomicBool>>,
     ) -> Result<Option<usize>> {
         let mut last_err = anyhow::anyhow!("no profiles available");
 
@@ -106,7 +109,7 @@ impl ResilienceRunner {
             store.state.config.llm.model = model.to_string();
 
             // LAYER 2: Overflow Recovery
-            match self.try_with_compaction(store, channel, http).await {
+            match self.try_with_compaction(store, channel, http, interrupted).await {
                 Ok(tokens) => {
                     self.profiles.mark_success(idx);
                     return Ok(tokens);
@@ -142,12 +145,13 @@ impl ResilienceRunner {
         store: &mut SharedStore,
         channel: &Arc<dyn Channel>,
         http: &reqwest::Client,
+        interrupted: &Option<Arc<AtomicBool>>,
     ) -> Result<Option<usize>> {
         let agent = Agent;
 
         for attempt in 0..tuning().max_overflow_compaction {
             // LAYER 3: Agent::run() — the tool-use loop
-            match agent.run(store, channel, http).await {
+            match agent.run(store, channel, http, interrupted.clone()).await {
                 Ok(tokens) => return Ok(tokens),
                 Err(e) => {
                     let reason = classify_failure(&e);
@@ -222,6 +226,7 @@ mod tests {
     use crate::core::todo::TodoManager;
     use crate::intelligence::manager::SharedAgents;
     use crate::resilience::profile::AuthProfile;
+    use crate::routing::protocol::ToolPolicy;
 
     fn test_store() -> SharedStore {
         SharedStore {
@@ -254,6 +259,7 @@ mod tests {
                 team: None,
                 team_name: None,
                 worktrees: None,
+                tool_policy: ToolPolicy::default(),
                 idle_requested: false,
             },
         }
@@ -336,6 +342,7 @@ mod tests {
                 team: None,
                 team_name: None,
                 worktrees: None,
+                tool_policy: ToolPolicy::default(),
                 idle_requested: false,
             },
         };

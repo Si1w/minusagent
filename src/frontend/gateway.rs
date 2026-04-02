@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -21,6 +22,7 @@ use crate::frontend::{Channel, UserMessage};
 use crate::intelligence::Intelligence;
 use crate::intelligence::manager::{AgentConfig, SharedAgents, normalize_agent_id};
 use crate::routing::delivery::DeliveryHandle;
+use crate::routing::protocol::{ControlEvent, SessionControl, ToolPolicy};
 use crate::routing::router::{Binding, BindingRouter, Router};
 use crate::scheduler::LaneLock;
 use crate::scheduler::cron::{CronHandle, CronJobStatus};
@@ -75,6 +77,7 @@ impl AppConfig {
                 team,
                 team_name: None,
                 worktrees,
+                tool_policy: ToolPolicy::default(),
                 idle_requested: false,
             },
         }
@@ -92,10 +95,24 @@ pub struct AppState {
 pub type SharedState = Arc<RwLock<AppState>>;
 
 /// Message passed to a session task
-struct SessionMessage {
-    text: String,
-    frontend: Arc<dyn Channel>,
-    done: Option<oneshot::Sender<()>>,
+enum SessionMessage {
+    /// Regular user turn
+    Turn {
+        text: String,
+        frontend: Arc<dyn Channel>,
+        done: Option<oneshot::Sender<()>>,
+    },
+    /// Control message requiring session state
+    Control {
+        ctrl: SessionControl,
+        reply: oneshot::Sender<ControlEvent>,
+    },
+}
+
+/// Per-session handle stored in the gateway
+struct SessionHandle {
+    tx: mpsc::Sender<SessionMessage>,
+    interrupted: Arc<AtomicBool>,
 }
 
 /// Result of a dispatch operation
@@ -112,7 +129,7 @@ pub struct DispatchResult {
 pub struct Gateway {
     state: SharedState,
     config: AppConfig,
-    session_txs: Mutex<HashMap<String, mpsc::Sender<SessionMessage>>>,
+    session_txs: Mutex<HashMap<String, SessionHandle>>,
     cron_handle: Mutex<Option<CronHandle>>,
     delivery: DeliveryHandle,
 }
@@ -193,6 +210,70 @@ impl Gateway {
         }
     }
 
+    /// Send a control message to an existing session
+    ///
+    /// # Arguments
+    ///
+    /// * `session_key` - Target session
+    /// * `ctrl` - Control message
+    ///
+    /// # Returns
+    ///
+    /// The control event response from the session.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if session not found or channel closed.
+    /// Interrupt a running session by setting its AtomicBool flag
+    ///
+    /// # Errors
+    ///
+    /// Returns error if session not found.
+    pub async fn interrupt(&self, session_key: &str) -> Result<()> {
+        let txs = self.session_txs.lock().await;
+        let handle = txs
+            .get(session_key)
+            .ok_or_else(|| anyhow::anyhow!("Session not found: {session_key}"))?;
+        handle.interrupted.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Send a control message to an existing session
+    ///
+    /// # Arguments
+    ///
+    /// * `session_key` - Target session
+    /// * `ctrl` - Control message
+    ///
+    /// # Returns
+    ///
+    /// The control event response from the session.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if session not found or channel closed.
+    pub async fn send_control(
+        &self,
+        session_key: &str,
+        ctrl: SessionControl,
+    ) -> Result<ControlEvent> {
+        let txs = self.session_txs.lock().await;
+        let handle = txs
+            .get(session_key)
+            .ok_or_else(|| anyhow::anyhow!("Session not found: {session_key}"))?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .tx
+            .send(SessionMessage::Control { ctrl, reply: reply_tx })
+            .await
+            .map_err(|_| anyhow::anyhow!("Session task closed"))?;
+
+        reply_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("Session did not respond"))
+    }
+
     /// Dispatch a user message: route → find/create session → forward
     ///
     /// # Arguments
@@ -253,14 +334,14 @@ impl Gateway {
 
         let session_tx = {
             let mut txs = self.session_txs.lock().await;
-            if let Some(tx) = txs.get(&session_key) {
-                if tx.is_closed() {
+            if let Some(h) = txs.get(&session_key) {
+                if h.tx.is_closed() {
                     txs.remove(&session_key);
                 }
             }
 
-            if let Some(tx) = txs.get(&session_key) {
-                tx.clone()
+            if let Some(h) = txs.get(&session_key) {
+                h.tx.clone()
             } else {
                 let intelligence = ws_dir.as_ref().map(|ws| {
                     Intelligence::new(
@@ -312,44 +393,60 @@ impl Gateway {
                 let fallback_models = self.config.fallback_models.clone();
 
                 let lock = lane_lock.clone();
+                let interrupted = Arc::new(AtomicBool::new(false));
+                let interrupted_clone = interrupted.clone();
                 let (stx, mut srx) =
                     mpsc::channel::<SessionMessage>(8);
                 tokio::spawn(async move {
-                    let mut session = match Session::new(store, lock, hb_handle, extra_profiles, fallback_models) {
+                    let mut session = match Session::new(store, lock, hb_handle, extra_profiles, fallback_models, interrupted_clone) {
                         Ok(s) => s,
                         Err(e) => {
                             log::error!("Failed to create session: {e}");
                             if let Some(msg) = srx.recv().await {
-                                msg.frontend.send(&format!("Error: {e}")).await;
-                                if let Some(done) = msg.done {
-                                    let _ = done.send(());
+                                if let SessionMessage::Turn { frontend, done, .. } = msg {
+                                    frontend.send(&format!("Error: {e}")).await;
+                                    if let Some(done) = done {
+                                        let _ = done.send(());
+                                    }
                                 }
                             }
                             return;
                         }
                     };
                     while let Some(msg) = srx.recv().await {
-                        if let Err(e) = session
-                            .turn(&msg.text, &msg.frontend)
-                            .await
-                        {
-                            msg.frontend
-                                .send(&format!("Error: {e}"))
-                                .await;
-                        }
-                        if let Some(done) = msg.done {
-                            let _ = done.send(());
+                        match msg {
+                            SessionMessage::Turn { text, frontend, done } => {
+                                if let Err(e) = session
+                                    .turn(&text, &frontend)
+                                    .await
+                                {
+                                    frontend
+                                        .send(&format!("Error: {e}"))
+                                        .await;
+                                }
+                                if let Some(done) = done {
+                                    let _ = done.send(());
+                                }
+                            }
+                            SessionMessage::Control { ctrl, reply } => {
+                                let event = session.handle_control(ctrl);
+                                let _ = reply.send(event);
+                            }
                         }
                     }
                 });
-                txs.insert(session_key.clone(), stx.clone());
-                stx
+                let tx = stx.clone();
+                txs.insert(session_key.clone(), SessionHandle {
+                    tx: stx,
+                    interrupted,
+                });
+                tx
             }
         };
 
         // 4. Send to session
         session_tx
-            .send(SessionMessage {
+            .send(SessionMessage::Turn {
                 text,
                 frontend,
                 done: Some(done_tx),
@@ -492,7 +589,27 @@ async fn handle_rpc(
     let params = req.get("params").cloned().unwrap_or(json!({}));
 
     let result = match method {
+        // User message
         "send" => m_send(gateway, &params).await,
+        // Session control
+        "context_usage" => m_control(gateway, &params, SessionControl::ContextUsage).await,
+        "rewind" => {
+            let count = params["count"].as_u64().unwrap_or(1) as usize;
+            m_control(gateway, &params, SessionControl::Rewind { count }).await
+        }
+        "model" => {
+            let model = params["model"].as_str().unwrap_or("").to_string();
+            m_control(gateway, &params, SessionControl::ModelSwitch { model }).await
+        }
+        "interrupt" => m_interrupt(gateway, &params).await,
+        "permission_mode" => {
+            let mode: crate::routing::protocol::PermissionMode = params
+                .get("mode")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            m_control(gateway, &params, SessionControl::SetPermissionMode { mode }).await
+        }
+        // Admin
         "bindings.set" => m_bindings_set(gateway, &params).await,
         "bindings.remove" => m_bindings_remove(gateway, &params).await,
         "bindings.list" => m_bindings_list(gateway).await,
@@ -700,6 +817,39 @@ async fn m_delivery_stats(
         })),
         None => Err("delivery runner not available".to_string()),
     }
+}
+
+async fn m_control(
+    gateway: &Arc<Gateway>,
+    params: &Value,
+    ctrl: SessionControl,
+) -> std::result::Result<Value, String> {
+    let session_key = params["session_key"]
+        .as_str()
+        .ok_or("session_key is required")?;
+
+    let event = gateway
+        .send_control(session_key, ctrl)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    serde_json::to_value(&event).map_err(|e| e.to_string())
+}
+
+async fn m_interrupt(
+    gateway: &Arc<Gateway>,
+    params: &Value,
+) -> std::result::Result<Value, String> {
+    let session_key = params["session_key"]
+        .as_str()
+        .ok_or("session_key is required")?;
+
+    gateway
+        .interrupt(session_key)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(json!({"interrupted": true}))
 }
 
 async fn m_status(

@@ -13,6 +13,7 @@ use crate::core::store::{
 use crate::core::task::BackgroundManager;
 use crate::core::todo::TodoManager;
 use crate::frontend::SilentChannel;
+use crate::routing::protocol::ToolPolicy;
 
 /// Per-session lane name shared by user turns and heartbeat
 pub const LANE_SESSION: &str = "session";
@@ -104,6 +105,7 @@ pub async fn run_single_turn(
             team: None,
             team_name: None,
             worktrees: None,
+            tool_policy: ToolPolicy::default(),
             idle_requested: false,
         },
     };
@@ -112,7 +114,7 @@ pub async fn run_single_turn(
         Arc::new(SilentChannel);
     let http = reqwest::Client::new();
     let agent = Agent;
-    agent.run(&mut store, &channel, &http).await?;
+    agent.run(&mut store, &channel, &http, None).await?;
 
     let response = store
         .context
