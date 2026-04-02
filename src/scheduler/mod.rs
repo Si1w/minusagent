@@ -10,8 +10,7 @@ use crate::core::agent::Agent;
 use crate::core::store::{
     Config, Context, LLMConfig, Message, Role, SharedStore, SystemState,
 };
-use crate::core::task::BackgroundManager;
-use crate::core::todo::TodoManager;
+use crate::team::{BackgroundManager, TodoManager};
 use crate::frontend::SilentChannel;
 use crate::routing::protocol::ToolPolicy;
 

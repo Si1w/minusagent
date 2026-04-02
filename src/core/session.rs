@@ -11,7 +11,7 @@ use crate::core::llm::LLMCall;
 use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore};
 use crate::frontend::{Channel, SilentChannel};
-use crate::core::team::TeammateStatus;
+use crate::team::TeammateStatus;
 use crate::intelligence::memory::MemoryWrite;
 use crate::resilience::profile::{AuthProfile, ProfileManager};
 use crate::resilience::runner::ResilienceRunner;

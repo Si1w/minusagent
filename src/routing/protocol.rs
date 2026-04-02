@@ -21,6 +21,8 @@ pub enum PermissionMode {
     Trust,
 }
 
+// TODO: wire auto_approve into tool dispatch
+#[allow(dead_code)]
 /// Read-only tools that are auto-approved in `Auto` mode
 const AUTO_APPROVE_TOOLS: &[&str] = &[
     "read_file",
@@ -39,6 +41,7 @@ const AUTO_APPROVE_TOOLS: &[&str] = &[
 pub struct ToolPolicy {
     pub mode: PermissionMode,
     /// Per-tool overrides (tool_name → allow)
+    #[allow(dead_code)]
     pub overrides: HashMap<String, bool>,
 }
 
@@ -56,6 +59,7 @@ impl ToolPolicy {
     ///
     /// Returns `Some(true)` to allow, `Some(false)` to deny,
     /// `None` to defer to `channel.confirm()`.
+    #[allow(dead_code)]
     pub fn auto_approve(&self, tool: &str) -> Option<bool> {
         if let Some(&allow) = self.overrides.get(tool) {
             return Some(allow);

@@ -222,8 +222,7 @@ impl ResilienceRunner {
 mod tests {
     use super::*;
     use crate::core::store::{Config, Context, LLMConfig, Message, Role, SystemState};
-    use crate::core::task::BackgroundManager;
-    use crate::core::todo::TodoManager;
+    use crate::team::{BackgroundManager, TodoManager};
     use crate::intelligence::manager::SharedAgents;
     use crate::resilience::profile::AuthProfile;
     use crate::routing::protocol::ToolPolicy;
