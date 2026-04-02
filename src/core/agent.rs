@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -265,6 +266,9 @@ pub fn run_subagent(
                 worktrees: None,
                 tool_policy: ToolPolicy::default(),
                 idle_requested: false,
+                plan_mode: false,
+                cron: None,
+                read_file_state: HashMap::new(),
             },
         };
 

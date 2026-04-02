@@ -14,6 +14,14 @@ pub fn bash_tool() -> ToolDefinition {
                     "command": {
                         "type": "string",
                         "description": "The shell command to execute."
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Timeout in seconds (default: from config)."
+                    },
+                    "dangerously_disable_sandbox": {
+                        "type": "boolean",
+                        "description": "Disable OS sandbox. Only when sandbox blocks a legitimate operation."
                     }
                 },
                 "required": ["command"]
@@ -708,12 +716,179 @@ pub fn worktree_exec_tool() -> ToolDefinition {
     }
 }
 
+pub fn web_fetch_tool() -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: "web_fetch".into(),
+            description: "Fetch the contents of a URL. Returns the \
+                          response body (truncated if too large)."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL to fetch."
+                    },
+                    "max_length": {
+                        "type": "integer",
+                        "description": "Max response chars (default: from config)."
+                    }
+                },
+                "required": ["url"]
+            }),
+        },
+    }
+}
+
+pub fn web_search_tool() -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: "web_search".into(),
+            description: "Search the web via DuckDuckGo. Returns \
+                          up to 10 results with title, URL, and snippet."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query."
+                    }
+                },
+                "required": ["query"]
+            }),
+        },
+    }
+}
+
+pub fn plan_mode_tool() -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: "plan_mode".into(),
+            description: "Toggle plan mode. In plan mode you should \
+                          only research and plan, not execute changes. \
+                          Exit plan mode when ready to execute."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "active": {
+                        "type": "boolean",
+                        "description": "true to enter plan mode, false to exit."
+                    }
+                },
+                "required": ["active"]
+            }),
+        },
+    }
+}
+
+pub fn cron_list_tool() -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: "cron_list".into(),
+            description: "List all cron jobs with their status."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+    }
+}
+
+pub fn cron_create_tool() -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: "cron_create".into(),
+            description: "Create a new cron job. Persists to CRON.json."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Unique job ID."
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Human-readable job name."
+                    },
+                    "schedule_kind": {
+                        "type": "string",
+                        "enum": ["at", "every", "cron"],
+                        "description": "Schedule type."
+                    },
+                    "at": {
+                        "type": "string",
+                        "description": "RFC3339 timestamp (for 'at' kind)."
+                    },
+                    "every_seconds": {
+                        "type": "integer",
+                        "description": "Interval in seconds (for 'every' kind, default 3600)."
+                    },
+                    "cron_expr": {
+                        "type": "string",
+                        "description": "Cron expression (for 'cron' kind, e.g. '0 0 9 * * * *')."
+                    },
+                    "payload_kind": {
+                        "type": "string",
+                        "enum": ["agent_turn", "system_event"],
+                        "description": "What to execute. Default: agent_turn."
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Message for agent_turn or text for system_event."
+                    },
+                    "channel": {
+                        "type": "string",
+                        "description": "Delivery channel (default: 'bg')."
+                    },
+                    "delete_after_run": {
+                        "type": "boolean",
+                        "description": "Auto-delete after execution (for 'at' schedules)."
+                    }
+                },
+                "required": ["id", "name", "schedule_kind", "message"]
+            }),
+        },
+    }
+}
+
+pub fn cron_delete_tool() -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: "cron_delete".into(),
+            description: "Delete a cron job by ID."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "string",
+                        "description": "ID of the job to delete."
+                    }
+                },
+                "required": ["job_id"]
+            }),
+        },
+    }
+}
+
 /// All built-in tool definitions for LLM registration
 pub fn all_tools(
     is_subagent: bool,
     has_tasks: bool,
     has_team: bool,
     has_worktrees: bool,
+    has_cron: bool,
 ) -> Vec<ToolDefinition> {
     let mut tools = vec![
         bash_tool(),
@@ -725,6 +900,9 @@ pub fn all_tools(
         todo_tool(),
         background_run_tool(),
         background_check_tool(),
+        web_fetch_tool(),
+        web_search_tool(),
+        plan_mode_tool(),
     ];
     if !is_subagent {
         tools.push(task_tool());
@@ -756,6 +934,11 @@ pub fn all_tools(
         tools.push(worktree_keep_tool());
         tools.push(worktree_list_tool());
         tools.push(worktree_exec_tool());
+    }
+    if has_cron {
+        tools.push(cron_list_tool());
+        tools.push(cron_create_tool());
+        tools.push(cron_delete_tool());
     }
     tools
 }

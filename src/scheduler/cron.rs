@@ -85,7 +85,7 @@ pub struct CronJobStatus {
 }
 
 /// CRON.json file structure
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct CronFile {
     #[serde(default)]
     jobs: Vec<CronJob>,
@@ -106,6 +106,8 @@ struct RunLogEntry {
 enum CronCmd {
     TriggerJob(String, oneshot::Sender<String>),
     ListJobs(oneshot::Sender<Vec<CronJobStatus>>),
+    CreateJob(CronJob, oneshot::Sender<String>),
+    DeleteJob(String, oneshot::Sender<String>),
     Reload(oneshot::Sender<String>),
     Stop,
 }
@@ -138,6 +140,29 @@ impl CronHandle {
             return Vec::new();
         }
         rx.await.unwrap_or_default()
+    }
+
+    /// Create a new cron job (persists to CRON.json)
+    pub async fn create_job(&self, job: CronJob) -> String {
+        let (tx, rx) = oneshot::channel();
+        if self.cmd_tx.send(CronCmd::CreateJob(job, tx)).await.is_err() {
+            return "cron service not running".to_string();
+        }
+        rx.await.unwrap_or_else(|_| "channel closed".to_string())
+    }
+
+    /// Delete a cron job by ID (persists to CRON.json)
+    pub async fn delete_job(&self, job_id: &str) -> String {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(CronCmd::DeleteJob(job_id.to_string(), tx))
+            .await
+            .is_err()
+        {
+            return "cron service not running".to_string();
+        }
+        rx.await.unwrap_or_else(|_| "channel closed".to_string())
     }
 
     /// Reload CRON.json
@@ -218,6 +243,21 @@ impl CronService {
             job.next_run_at = compute_next(&job, now);
             log::info!("Loaded cron job '{}' ({})", job.name, job.schedule.kind);
             self.jobs.push(job);
+        }
+    }
+
+    /// Persist current jobs back to CRON.json
+    fn save_jobs(&self) {
+        let file = CronFile {
+            jobs: self.jobs.clone(),
+        };
+        match serde_json::to_string_pretty(&file) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&self.cron_file, json) {
+                    log::warn!("Failed to save CRON.json: {e}");
+                }
+            }
+            Err(e) => log::warn!("Failed to serialize cron jobs: {e}"),
         }
     }
 
@@ -456,6 +496,39 @@ pub fn spawn(
                         }
                         Some(CronCmd::ListJobs(reply)) => {
                             let _ = reply.send(svc.list_jobs());
+                        }
+                        Some(CronCmd::CreateJob(mut job, reply)) => {
+                            if svc.jobs.iter().any(|j| j.id == job.id) {
+                                let _ = reply.send(format!(
+                                    "Job '{}' already exists",
+                                    job.id
+                                ));
+                            } else {
+                                let now = now_secs();
+                                job.next_run_at = compute_next(&job, now);
+                                let msg = format!(
+                                    "Created job '{}' ({})",
+                                    job.name, job.schedule.kind
+                                );
+                                svc.jobs.push(job);
+                                svc.save_jobs();
+                                log::info!("{msg}");
+                                let _ = reply.send(msg);
+                            }
+                        }
+                        Some(CronCmd::DeleteJob(id, reply)) => {
+                            let before = svc.jobs.len();
+                            svc.jobs.retain(|j| j.id != id);
+                            if svc.jobs.len() < before {
+                                svc.save_jobs();
+                                let msg = format!("Deleted job '{id}'");
+                                log::info!("{msg}");
+                                let _ = reply.send(msg);
+                            } else {
+                                let _ = reply.send(format!(
+                                    "Job '{id}' not found"
+                                ));
+                            }
                         }
                         Some(CronCmd::Reload(reply)) => {
                             svc.load_jobs();

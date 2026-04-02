@@ -2,6 +2,7 @@ pub mod cron;
 pub mod heartbeat;
 pub mod lane;
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
@@ -106,6 +107,9 @@ pub async fn run_single_turn(
             worktrees: None,
             tool_policy: ToolPolicy::default(),
             idle_requested: false,
+            plan_mode: false,
+            cron: None,
+            read_file_state: HashMap::new(),
         },
     };
 

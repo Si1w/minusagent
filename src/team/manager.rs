@@ -725,6 +725,9 @@ async fn teammate_loop(
             worktrees: None,
             tool_policy: ToolPolicy::default(),
             idle_requested: false,
+            plan_mode: false,
+            cron: None,
+            read_file_state: HashMap::new(),
         },
     };
 
