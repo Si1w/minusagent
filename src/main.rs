@@ -23,7 +23,6 @@ use crate::routing::router::{BindingRouter, BindingTable};
 
 #[tokio::main]
 async fn main() {
-    logger::TuiLogger::init();
     scheduler::init_bg_output();
 
     let config = AppConfig::load();
@@ -47,7 +46,14 @@ async fn main() {
     }));
 
     let gateway = Arc::new(Gateway::new(state, config).await);
-    let cli: Arc<dyn Channel> = Arc::new(Cli::new());
 
-    frontend::repl::run(gateway, cli).await;
+    if std::env::args().any(|a| a == "--stdio") {
+        if let Err(e) = frontend::stdio::run(gateway).await {
+            eprintln!("stdio error: {e}");
+        }
+    } else {
+        logger::TuiLogger::init();
+        let cli: Arc<dyn Channel> = Arc::new(Cli::new());
+        frontend::repl::run(gateway, cli).await;
+    }
 }

@@ -351,6 +351,7 @@ mod tests {
                 team: None,
                 team_name: None,
                 worktrees: None,
+                tool_policy: crate::routing::protocol::ToolPolicy::default(),
                 idle_requested: false,
             },
         };

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use anyhow::Result;
 use chrono::Utc;
@@ -15,6 +16,7 @@ use crate::intelligence::memory::MemoryWrite;
 use crate::resilience::profile::{AuthProfile, ProfileManager};
 use crate::resilience::runner::ResilienceRunner;
 use crate::config::tuning;
+use crate::routing::protocol::{ControlEvent, SessionControl};
 use crate::scheduler::{LANE_SESSION, LaneLock};
 use crate::scheduler::heartbeat::HeartbeatHandle;
 
@@ -195,6 +197,8 @@ pub struct Session {
     http: reqwest::Client,
     lane_lock: LaneLock,
     heartbeat: Option<HeartbeatHandle>,
+    /// Shared flag for external interrupt (set by Gateway, checked in cot_loop)
+    interrupted: Arc<AtomicBool>,
 }
 
 impl Session {
@@ -211,6 +215,7 @@ impl Session {
         heartbeat: Option<HeartbeatHandle>,
         extra_profiles: Vec<AuthProfile>,
         fallback_models: Vec<String>,
+        interrupted: Arc<AtomicBool>,
     ) -> Result<Self> {
         let session_store = SessionStore::new(Path::new(SESSIONS_DIR))?;
         let http = reqwest::Client::new();
@@ -227,6 +232,7 @@ impl Session {
             http,
             lane_lock,
             heartbeat,
+            interrupted,
         })
     }
 
@@ -272,9 +278,15 @@ impl Session {
             tool_call_id: None,
         });
 
+        let interrupted = Some(self.interrupted.clone());
         let total_tokens = self
             .resilience
-            .run(&mut self.store, channel, &self.http)
+            .run(
+                &mut self.store,
+                channel,
+                &self.http,
+                &interrupted,
+            )
             .await?;
 
         // Check if compaction is needed
@@ -737,8 +749,14 @@ impl Session {
                         tool_calls: None,
                         tool_call_id: None,
                     });
+                    let interrupted = Some(self.interrupted.clone());
                     self.resilience
-                        .run(&mut self.store, channel, &self.http)
+                        .run(
+                            &mut self.store,
+                            channel,
+                            &self.http,
+                            &interrupted,
+                        )
                         .await?;
                     return Ok(());
                 }
@@ -750,6 +768,51 @@ impl Session {
         }
 
         Ok(())
+    }
+
+    /// Handle a control message that requires session state
+    pub fn handle_control(&mut self, ctrl: SessionControl) -> ControlEvent {
+        match ctrl {
+            SessionControl::ContextUsage => {
+                let history_len = self.store.context.history.len();
+                // Rough token estimate: 4 chars ≈ 1 token
+                let estimated_tokens: usize = self
+                    .store
+                    .context
+                    .history
+                    .iter()
+                    .map(|m| m.content.as_deref().unwrap_or("").len() / 4)
+                    .sum::<usize>()
+                    + self.store.context.system_prompt.len() / 4;
+
+                ControlEvent::ContextInfo {
+                    used_tokens: estimated_tokens,
+                    total_tokens: self.store.state.config.llm.context_window,
+                    history_messages: history_len,
+                }
+            }
+            SessionControl::Rewind { count } => {
+                let len = self.store.context.history.len();
+                let remove = count.min(len);
+                self.store.context.history.truncate(len - remove);
+                ControlEvent::Rewound {
+                    removed: remove,
+                    remaining: self.store.context.history.len(),
+                }
+            }
+            SessionControl::ModelSwitch { model } => {
+                self.store.state.config.llm.model = model.clone();
+                ControlEvent::TurnComplete {
+                    text: Some(format!("model → {model}")),
+                }
+            }
+            SessionControl::SetPermissionMode { mode } => {
+                self.store.state.tool_policy.mode = mode;
+                ControlEvent::TurnComplete {
+                    text: Some("permission mode updated".into()),
+                }
+            }
+        }
     }
 }
 

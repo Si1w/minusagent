@@ -18,6 +18,7 @@ use crate::core::todo::TodoManager;
 use crate::frontend::SilentChannel;
 use crate::intelligence::Intelligence;
 use crate::intelligence::manager::SharedAgents;
+use crate::routing::protocol::ToolPolicy;
 use crate::config::tuning;
 use crate::scheduler::now_secs;
 
@@ -722,6 +723,7 @@ async fn teammate_loop(
             team: Some(team.clone()),
             team_name: Some(name.to_string()),
             worktrees: None,
+            tool_policy: ToolPolicy::default(),
             idle_requested: false,
         },
     };
@@ -768,6 +770,7 @@ async fn teammate_loop(
                 max_turns: Some(tuning().max_teammate_turns),
                 nag_reminder: false,
                 flush_on_done: false,
+                interrupted: None,
             },
         )
         .await?;

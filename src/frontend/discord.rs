@@ -15,6 +15,8 @@ use crate::frontend::gateway::Gateway;
 use crate::frontend::utils::chunk_text;
 use crate::frontend::{Channel, UserMessage};
 use crate::routing::delivery::DeliverySink;
+use crate::routing::protocol::{ControlEvent, SessionControl};
+use crate::routing::router::Router;
 
 const GATEWAY_URL: &str =
     "wss://gateway.discord.gg/?v=10&encoding=json";
@@ -580,6 +582,25 @@ pub async fn start_gateway(
                         continue;
                     }
 
+                    // Handle control commands (!interrupt, !rewind, !model, !context)
+                    if let Some(ctrl) = parse_control_command(&msg.content) {
+                        let reply_text = handle_control_command(
+                            &gateway,
+                            ctrl,
+                            &msg.author.id,
+                            &bot_user_id,
+                        )
+                        .await;
+                        let _ = post_discord_message(
+                            &http,
+                            &token,
+                            &msg.channel_id,
+                            &reply_text,
+                        )
+                        .await;
+                        continue;
+                    }
+
                     let reply = Arc::new(DiscordReply::new(
                         msg.channel_id,
                         token.clone(),
@@ -614,6 +635,109 @@ pub async fn start_gateway(
             "Discord: disconnected, reconnecting..."
         );
         tokio::time::sleep(Duration::from_secs(tuning().reconnect_delay_secs)).await;
+    }
+}
+
+// ── Control commands ─────────────────────────────────────────
+
+/// Parsed Discord control command
+enum DiscordControl {
+    Interrupt,
+    Session(SessionControl),
+}
+
+/// Parse a `!`-prefixed control command from Discord message
+fn parse_control_command(text: &str) -> Option<DiscordControl> {
+    let text = text.trim();
+    if !text.starts_with('!') {
+        return None;
+    }
+    let parts: Vec<&str> = text[1..].splitn(2, ' ').collect();
+    let cmd = parts[0];
+    let arg = parts.get(1).copied().unwrap_or("").trim();
+
+    match cmd {
+        "interrupt" | "stop" => Some(DiscordControl::Interrupt),
+        "rewind" => {
+            let count = arg.parse().unwrap_or(1);
+            Some(DiscordControl::Session(SessionControl::Rewind { count }))
+        }
+        "model" if !arg.is_empty() => {
+            Some(DiscordControl::Session(SessionControl::ModelSwitch {
+                model: arg.to_string(),
+            }))
+        }
+        "context" => Some(DiscordControl::Session(SessionControl::ContextUsage)),
+        _ => None,
+    }
+}
+
+/// Execute a control command and return a human-readable response
+async fn handle_control_command(
+    gateway: &Arc<Gateway>,
+    ctrl: DiscordControl,
+    peer_id: &str,
+    account_id: &str,
+) -> String {
+    let session_key = {
+        let s = gateway.state().read().await;
+        let test_msg = UserMessage {
+            text: String::new(),
+            sender_id: peer_id.to_string(),
+            channel: "discord".into(),
+            account_id: account_id.to_string(),
+            guild_id: String::new(),
+        };
+        let result = s.router.resolve(&test_msg);
+        result.session_key
+    };
+
+    match ctrl {
+        DiscordControl::Interrupt => {
+            match gateway.interrupt(&session_key).await {
+                Ok(()) => "interrupted".into(),
+                Err(e) => format!("Error: {e}"),
+            }
+        }
+        DiscordControl::Session(sc) => {
+            match gateway.send_control(&session_key, sc).await {
+                Ok(event) => format_control_event(&event),
+                Err(e) => format!("Error: {e}"),
+            }
+        }
+    }
+}
+
+/// Format a ControlEvent as a Discord-friendly message
+fn format_control_event(event: &ControlEvent) -> String {
+    match event {
+        ControlEvent::ContextInfo {
+            used_tokens,
+            total_tokens,
+            history_messages,
+        } => {
+            let pct = if *total_tokens > 0 {
+                *used_tokens * 100 / *total_tokens
+            } else {
+                0
+            };
+            format!(
+                "Context: ~{used_tokens}/{total_tokens} tokens ({pct}%), {history_messages} messages"
+            )
+        }
+        ControlEvent::Rewound { removed, remaining } => {
+            format!("Rewound {removed} messages ({remaining} remaining)")
+        }
+        ControlEvent::SessionReady { model, .. } => {
+            format!("OK (model: {model})")
+        }
+        ControlEvent::TurnComplete { text } => {
+            text.clone().unwrap_or_else(|| "OK".into())
+        }
+        ControlEvent::Error { message, .. } => {
+            format!("Error: {message}")
+        }
+        _ => "OK".into(),
     }
 }
 

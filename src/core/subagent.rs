@@ -15,6 +15,7 @@ use crate::frontend::{Channel, SilentChannel};
 use crate::config::tuning;
 use crate::intelligence::Intelligence;
 use crate::intelligence::manager::SharedAgents;
+use crate::routing::protocol::ToolPolicy;
 
 /// Run an agent with isolated context
 ///
@@ -84,6 +85,7 @@ pub fn run_subagent(
                 team: None,
                 team_name: None,
                 worktrees: None,
+                tool_policy: ToolPolicy::default(),
                 idle_requested: false,
             },
         };
@@ -99,6 +101,7 @@ pub fn run_subagent(
                 max_turns: Some(tuning().max_subagent_turns),
                 nag_reminder: false,
                 flush_on_done: false,
+                interrupted: None,
             },
         )
         .await?;

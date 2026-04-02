@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 
@@ -17,6 +18,8 @@ pub struct CotOptions {
     pub nag_reminder: bool,
     /// Flush the channel when the LLM finishes (no more tool calls)
     pub flush_on_done: bool,
+    /// Shared flag to interrupt the loop from outside (e.g. via control protocol)
+    pub interrupted: Option<Arc<AtomicBool>>,
 }
 
 /// Run the chain-of-thought loop: call LLM → dispatch tools → repeat
@@ -38,6 +41,13 @@ pub async fn cot_loop(
 
     let mut turns: usize = 0;
     loop {
+        if let Some(flag) = &opts.interrupted {
+            if flag.swap(false, Ordering::Relaxed) {
+                channel.send("[interrupted]").await;
+                break;
+            }
+        }
+
         if let Some(max) = opts.max_turns {
             if turns >= max {
                 break;
@@ -203,6 +213,7 @@ impl Agent {
         store: &mut SharedStore,
         channel: &Arc<dyn Channel>,
         http: &reqwest::Client,
+        interrupted: Option<Arc<AtomicBool>>,
     ) -> Result<Option<usize>> {
         cot_loop(
             store,
@@ -212,6 +223,7 @@ impl Agent {
                 max_turns: None,
                 nag_reminder: true,
                 flush_on_done: true,
+                interrupted,
             },
         )
         .await

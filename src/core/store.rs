@@ -7,6 +7,7 @@ use crate::core::todo::TodoManager;
 use crate::core::worktree::WorktreeManager;
 use crate::intelligence::Intelligence;
 use crate::intelligence::manager::SharedAgents;
+use crate::routing::protocol::ToolPolicy;
 
 /// LLM-visible conversation state
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +64,8 @@ pub struct SystemState {
     pub team_name: Option<String>,
     /// Worktree manager for task isolation
     pub worktrees: Option<WorktreeManager>,
+    /// Per-session tool permission policy
+    pub tool_policy: ToolPolicy,
     /// Set by the `idle` tool to break out of cot_loop
     pub idle_requested: bool,
 }
@@ -110,6 +113,7 @@ impl SharedStore {
                 team: None,
                 team_name: None,
                 worktrees: None,
+                tool_policy: ToolPolicy::default(),
                 idle_requested: false,
             },
         }
