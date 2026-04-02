@@ -1,10 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 pub use crate::config::LLMConfig;
-use crate::core::task::{BackgroundManager, TaskManager};
-use crate::core::team::TeammateManager;
-use crate::core::todo::TodoManager;
-use crate::core::worktree::WorktreeManager;
+use crate::team::{
+    BackgroundManager, TaskManager, TeammateManager, TodoManager, WorktreeManager,
+};
 use crate::intelligence::Intelligence;
 use crate::intelligence::manager::SharedAgents;
 use crate::routing::protocol::ToolPolicy;

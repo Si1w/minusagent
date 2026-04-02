@@ -13,8 +13,8 @@ use crate::core::agent::{CotOptions, cot_loop};
 use crate::core::store::{
     Config, Context, LLMConfig, Message, Role, SharedStore, SystemState,
 };
-use crate::core::task::{BackgroundManager, TaskManager};
-use crate::core::todo::TodoManager;
+use crate::team::task::{BackgroundManager, TaskManager};
+use crate::team::todo::TodoManager;
 use crate::frontend::SilentChannel;
 use crate::intelligence::Intelligence;
 use crate::intelligence::manager::SharedAgents;

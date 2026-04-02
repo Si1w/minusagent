@@ -12,6 +12,8 @@ mod logger;
 mod resilience;
 mod routing;
 mod scheduler;
+mod team;
+mod tool;
 
 use crate::config::{AppConfig, tuning};
 use crate::frontend::cli::Cli;

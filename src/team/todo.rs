@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::node::Node;
 use crate::core::store::SharedStore;
-use crate::core::tool::push_tool_result;
+use crate::tool::push_tool_result;
 
 /// Status of a todo item
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

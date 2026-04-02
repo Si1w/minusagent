@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore, ToolCall};
-use crate::core::tool::{ToolDefinition, all_tools};
+use crate::tool::{ToolDefinition, all_tools};
 use crate::frontend::Channel;
 
 // Request types
@@ -313,8 +313,7 @@ impl Node for LLMCall {
 mod tests {
     use super::*;
     use crate::core::store::{Config, Context, LLMConfig, SystemState};
-    use crate::core::task::BackgroundManager;
-    use crate::core::todo::TodoManager;
+    use crate::team::{BackgroundManager, TodoManager};
     use crate::frontend::SilentChannel;
     use crate::intelligence::manager::SharedAgents;
 
