@@ -18,7 +18,7 @@ use crate::intelligence::manager::normalize_agent_id;
 use crate::scheduler::cron::{CronJob, Payload, ScheduleConfig};
 use crate::team::{BackgroundStatus, TaskStatus, TodoItem, TodoWrite, WorktreeStatus};
 
-pub use schema::all_tools;
+pub use schema::all_tools_filtered;
 
 /// Tool definition for LLM function calling registration
 #[derive(Debug, Clone, Serialize)]
@@ -60,6 +60,17 @@ pub async fn dispatch_tool(
     channel: &Arc<dyn Channel>,
 ) -> Result<bool> {
     let args: serde_json::Value = serde_json::from_str(arguments)?;
+
+    // Enforce tool policy: deny tools that are explicitly blocked
+    if store.state.tool_policy.is_denied(name) {
+        store.context.history.push(Message {
+            role: Role::Tool,
+            content: Some(format!("Error: tool '{name}' is not allowed for this agent.")),
+            tool_calls: None,
+            tool_call_id: Some(call_id),
+        });
+        return Ok(true);
+    }
 
     match name {
         "bash" => {
@@ -478,6 +489,7 @@ pub async fn dispatch_tool(
                             Some(PathBuf::from(&config.workspace_dir))
                         };
                         let llm_config = store.state.config.llm.clone();
+                        let denied = config.denied_tools.clone();
                         let summary = run_subagent(
                             prompt,
                             config.system_prompt.clone(),
@@ -486,6 +498,7 @@ pub async fn dispatch_tool(
                             agent_id,
                             store.state.agents.clone(),
                             store.state.tasks.clone(),
+                            denied,
                         )
                         .await?;
                         push_tool_result(store, &call_id, summary);
@@ -1192,6 +1205,7 @@ pub fn push_tool_result(store: &mut SharedStore, call_id: &str, content: String)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool::schema::all_tools;
 
     #[tokio::test]
     async fn test_bash_exec() {

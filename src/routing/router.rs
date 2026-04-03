@@ -488,6 +488,7 @@ mod tests {
             model: String::new(),
             dm_scope: "per-peer".into(),
             workspace_dir: String::new(),
+            denied_tools: Vec::new(),
         });
         mgr.register(AgentConfig {
             id: "sage".into(),
@@ -496,6 +497,7 @@ mod tests {
             model: String::new(),
             dm_scope: "per-channel-peer".into(),
             workspace_dir: String::new(),
+            denied_tools: Vec::new(),
         });
 
         let mut bt = BindingTable::new();
@@ -546,6 +548,7 @@ mod tests {
             model: String::new(),
             dm_scope: "per-channel-peer".into(),
             workspace_dir: String::new(),
+            denied_tools: Vec::new(),
         });
         let bt = BindingTable::new();
         let router = BindingRouter::new(bt, wrap_mgr(mgr), "mandeven", test_outbound());

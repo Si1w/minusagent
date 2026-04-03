@@ -5,7 +5,7 @@ use std::sync::{Arc, LazyLock, RwLock};
 use regex::Regex;
 
 use crate::config::tuning;
-use crate::intelligence::utils::{discover_subdirs, extract_body};
+use crate::intelligence::utils::{discover_subdirs, extract_body, parse_frontmatter};
 
 static VALID_ID_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-z0-9][a-z0-9_-]{0,63}$").unwrap());
@@ -55,6 +55,8 @@ pub struct AgentConfig {
     pub dm_scope: String,
     /// Per-agent workspace directory; overrides global `WORKSPACE_DIR`
     pub workspace_dir: String,
+    /// Tools this agent is not allowed to use (parsed from AGENT.md frontmatter)
+    pub denied_tools: Vec<String>,
 }
 
 
@@ -129,6 +131,7 @@ impl AgentManager {
     /// The entire file content is used as the system prompt (identity).
     pub fn discover_workspace(&mut self, base_dir: &Path) {
         for f in discover_subdirs(base_dir, "AGENT.md") {
+            let meta = parse_frontmatter(&f.content);
             let identity = extract_body(&f.content);
             let identity = if identity.is_empty() {
                 f.content.trim().to_string()
@@ -139,6 +142,15 @@ impl AgentManager {
                 .parent()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
+            let denied_tools = meta
+                .get("denied_tools")
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
 
             self.register(AgentConfig {
                 id: f.name.clone(),
@@ -147,6 +159,7 @@ impl AgentManager {
                 model: String::new(),
                 dm_scope: "per-peer".into(),
                 workspace_dir,
+                denied_tools,
             });
         }
     }
@@ -230,6 +243,7 @@ mod tests {
             model: String::new(),
             dm_scope: "per-peer".into(),
             workspace_dir: String::new(),
+            denied_tools: Vec::new(),
         };
         assert_eq!(
             config.system_prompt,
@@ -247,6 +261,7 @@ mod tests {
             model: String::new(),
             dm_scope: "per-peer".into(),
             workspace_dir: String::new(),
+            denied_tools: Vec::new(),
         });
         assert!(mgr.get("luna").is_some());
         assert!(mgr.get("LUNA").is_some());
@@ -263,6 +278,7 @@ mod tests {
             model: "custom-model".into(),
             dm_scope: "per-peer".into(),
             workspace_dir: String::new(),
+            denied_tools: Vec::new(),
         });
         mgr.register(AgentConfig {
             id: "b".into(),
@@ -271,6 +287,7 @@ mod tests {
             model: String::new(),
             dm_scope: "per-peer".into(),
             workspace_dir: String::new(),
+            denied_tools: Vec::new(),
         });
         assert_eq!(mgr.effective_model("a"), "custom-model");
         assert_eq!(mgr.effective_model("b"), "global-model");
