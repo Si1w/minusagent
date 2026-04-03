@@ -12,6 +12,7 @@ use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore};
 use crate::frontend::{Channel, SilentChannel};
 use crate::team::TeammateStatus;
+use crate::team::todo::TodoStatus;
 use crate::intelligence::memory::MemoryWrite;
 use crate::resilience::profile::{AuthProfile, ProfileManager};
 use crate::resilience::runner::ResilienceRunner;
@@ -21,6 +22,7 @@ use crate::scheduler::{LANE_SESSION, LaneLock};
 use crate::scheduler::heartbeat::HeartbeatHandle;
 
 const SESSIONS_DIR: &str = "sessions";
+const CLEARED_TOOL_MARKER: &str = "[Old tool result content cleared]";
 
 /// Index entry for a session
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,6 +201,8 @@ pub struct Session {
     heartbeat: Option<HeartbeatHandle>,
     /// Shared flag for external interrupt (set by Gateway, checked in cot_loop)
     interrupted: Arc<AtomicBool>,
+    /// Consecutive auto-compact failures (circuit breaker for L2)
+    compact_failures: usize,
 }
 
 impl Session {
@@ -233,6 +237,7 @@ impl Session {
             lane_lock,
             heartbeat,
             interrupted,
+            compact_failures: 0,
         })
     }
 
@@ -289,27 +294,108 @@ impl Session {
             )
             .await?;
 
-        // Check if compaction is needed
+        // 3-layer compaction cascade
         let context_window = self.store.state.config.llm.context_window;
         if let Some(tokens) = total_tokens {
-            let threshold =
-                (context_window as f64 * tuning().compact_threshold) as usize;
+            let threshold = (context_window as f64
+                * tuning().compact_threshold) as usize;
             if tokens > threshold {
-                channel
-                    .send("[guard] Approaching context limit, compacting...")
-                    .await;
-                self.compact().await?;
+                // L1: MicroCompact — free, no API call
+                let cleared = Self::micro_compact(&mut self.store);
+                if cleared > 0 {
+                    channel
+                        .send(&format!(
+                            "[compact L1] Cleared {cleared} old tool results"
+                        ))
+                        .await;
+                }
+
+                // Re-estimate after micro
+                let est = estimate_tokens(&self.store);
+                if est > threshold {
+                    // L2: AutoCompact — LLM summarization
+                    if self.compact_failures
+                        < tuning().compact_max_failures
+                    {
+                        channel
+                            .send("[compact L2] Summarizing history...")
+                            .await;
+                        match self.auto_compact().await {
+                            Ok(()) => {
+                                self.compact_failures = 0;
+                            }
+                            Err(e) => {
+                                self.compact_failures += 1;
+                                log::warn!(
+                                    "auto-compact failed ({}/{}): {e}",
+                                    self.compact_failures,
+                                    tuning().compact_max_failures,
+                                );
+                            }
+                        }
+                    }
+
+                    // Re-estimate after auto
+                    let est = estimate_tokens(&self.store);
+                    if est > threshold {
+                        // L3: Full Compact
+                        channel
+                            .send(
+                                "[compact L3] Full compaction...",
+                            )
+                            .await;
+                        self.full_compact().await?;
+                    }
+                }
             }
         }
 
         Ok(())
     }
 
-    /// Compact history by summarizing older messages via LLM
+    // ── L1: MicroCompact ───────��─────────────────────────────
+
+    /// Clear old tool-result content in-place (no API call)
+    ///
+    /// Replaces tool message content with a placeholder for all tool
+    /// messages except those in the most recent 20% of history.
+    /// Returns the number of messages cleared.
+    fn micro_compact(store: &mut SharedStore) -> usize {
+        let total = store.context.history.len();
+        if total <= 4 {
+            return 0;
+        }
+
+        let keep_recent = std::cmp::max(4, total / 5);
+        let boundary = total - keep_recent;
+        let mut cleared = 0;
+
+        for msg in &mut store.context.history[..boundary] {
+            if msg.role == Role::Tool {
+                if let Some(ref content) = msg.content {
+                    if !content.starts_with(CLEARED_TOOL_MARKER) {
+                        msg.content =
+                            Some(CLEARED_TOOL_MARKER.into());
+                        cleared += 1;
+                    }
+                }
+            }
+        }
+
+        if cleared > 0 {
+            log::info!("micro-compact: cleared {cleared} tool results");
+        }
+        cleared
+    }
+
+    // ── L2: AutoCompact ──────────────────────────────────────
+
+    /// LLM-based summarization of older history
     ///
     /// Keeps the most recent 20% (min 4) messages intact.
     /// Summarizes the first 50% into a single user/assistant pair.
-    async fn compact(&mut self) -> Result<()> {
+    /// Budget: `compact_summary_ratio` of context window.
+    async fn auto_compact(&mut self) -> Result<()> {
         let total = self.store.context.history.len();
         if total <= 4 {
             return Ok(());
@@ -324,54 +410,26 @@ impl Session {
             return Ok(());
         }
 
-        let old_messages = &self.store.context.history[..compress_count];
-        let mut old_text = String::new();
-        for msg in old_messages {
-            let role = match msg.role {
-                Role::User => "user",
-                Role::Assistant => "assistant",
-                Role::Tool => "tool",
-            };
-            if let Some(content) = &msg.content {
-                old_text.push_str(&format!("[{role}]: {content}\n"));
-            }
-        }
+        let ctx_window = self.store.state.config.llm.context_window;
+        let summary_budget = (ctx_window as f64
+            * tuning().compact_summary_ratio) as usize;
+        let summary_chars = summary_budget * 4; // 1 token ≈ 4 chars
+
+        let old_text = format_messages_for_summary(
+            &self.store.context.history[..compress_count],
+        );
 
         let summary_prompt = format!(
-            "Summarize the following conversation concisely, \
-             preserving key facts and decisions. \
+            "CRITICAL: Respond with plain text ONLY. \
+             Do NOT call any tools.\n\n\
+             Summarize the following conversation concisely, \
+             preserving key facts, decisions, and file paths. \
+             Keep your summary under {summary_chars} characters. \
              Output only the summary, no preamble.\n\n{old_text}"
         );
 
-        let original_history =
-            std::mem::take(&mut self.store.context.history);
-        let original_prompt = self.store.context.system_prompt.clone();
-
-        self.store.context.system_prompt =
-            "You are a conversation summarizer. Be concise and factual."
-                .into();
-        self.store.context.history = vec![Message {
-            role: Role::User,
-            content: Some(summary_prompt),
-            tool_calls: None,
-            tool_call_id: None,
-        }];
-
-        let llm = LLMCall {
-            channel: Arc::new(SilentChannel),
-            http: self.http.clone(),
-        };
-        let response = llm.run(&mut self.store).await;
-
-        self.store.context.system_prompt = original_prompt;
-
-        let summary_text = match response {
-            Ok(resp) => resp.content.unwrap_or_default(),
-            Err(_) => {
-                self.store.context.history = original_history;
-                return Ok(());
-            }
-        };
+        let summary_text =
+            self.run_summarizer(&summary_prompt).await?;
 
         let mut compacted = vec![
             Message {
@@ -393,10 +451,147 @@ impl Session {
                 tool_call_id: None,
             },
         ];
-        compacted.extend_from_slice(&original_history[compress_count..]);
+        compacted.extend_from_slice(
+            &self.store.context.history[compress_count..],
+        );
         self.store.context.history = compacted;
 
+        log::info!(
+            "auto-compact: {total} -> {} messages",
+            self.store.context.history.len(),
+        );
         Ok(())
+    }
+
+    // ── L3: Full Compact ───────────────────��─────────────────
+
+    /// Full conversation summary with context re-injection
+    ///
+    /// Summarizes the entire history, then re-injects:
+    /// - Recently read file paths
+    /// - Active todo items
+    /// Budget: `full_compact_summary_ratio` of context window.
+    async fn full_compact(&mut self) -> Result<()> {
+        let total = self.store.context.history.len();
+        if total <= 2 {
+            return Ok(());
+        }
+
+        let ctx_window = self.store.state.config.llm.context_window;
+        let summary_budget = (ctx_window as f64
+            * tuning().full_compact_summary_ratio) as usize;
+        let summary_chars = summary_budget * 4;
+
+        let old_text =
+            format_messages_for_summary(&self.store.context.history);
+
+        let summary_prompt = format!(
+            "CRITICAL: Respond with plain text ONLY. \
+             Do NOT call any tools.\n\n\
+             Summarize the following entire conversation, \
+             preserving ALL key facts, decisions, file paths, \
+             code changes, and current task state. \
+             Keep your summary under {summary_chars} characters. \
+             Output only the summary, no preamble.\n\n{old_text}"
+        );
+
+        let summary_text =
+            self.run_summarizer(&summary_prompt).await?;
+
+        // Build re-injection context
+        let mut reinject = String::new();
+
+        // Re-inject recently read file paths
+        if !self.store.state.read_file_state.is_empty() {
+            reinject.push_str("\n\n[Recently read files]\n");
+            for path in self.store.state.read_file_state.keys() {
+                reinject.push_str(&format!("- {path}\n"));
+            }
+        }
+
+        // Re-inject active todo items
+        let active: Vec<_> = self
+            .store
+            .state
+            .todo
+            .items
+            .iter()
+            .filter(|t| !matches!(t.status, TodoStatus::Completed))
+            .collect();
+        if !active.is_empty() {
+            reinject.push_str("\n[Active tasks]\n");
+            for item in &active {
+                reinject.push_str(&format!(
+                    "- [{:?}] {}\n",
+                    item.status, item.text,
+                ));
+            }
+        }
+
+        self.store.context.history = vec![
+            Message {
+                role: Role::User,
+                content: Some(format!(
+                    "[Full conversation summary]\n\
+                     {summary_text}{reinject}"
+                )),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: Some(
+                    "Understood. I have the full context from our \
+                     conversation and will continue from here."
+                        .into(),
+                ),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+
+        log::info!(
+            "full-compact: {total} -> {} messages",
+            self.store.context.history.len(),
+        );
+        Ok(())
+    }
+
+    // ── Compact helpers ────────���─────────────────────────────
+
+    /// Run a one-shot LLM summarization call (no tools)
+    ///
+    /// Temporarily swaps the store's context to run the summarizer,
+    /// then restores the original system prompt.
+    async fn run_summarizer(
+        &mut self,
+        prompt: &str,
+    ) -> Result<String> {
+        let original_history =
+            std::mem::take(&mut self.store.context.history);
+        let original_prompt = self.store.context.system_prompt.clone();
+
+        self.store.context.system_prompt =
+            "You are a conversation summarizer. Be concise and factual. \
+             NEVER call tools — respond with plain text only."
+                .into();
+        self.store.context.history = vec![Message {
+            role: Role::User,
+            content: Some(prompt.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+
+        let llm = LLMCall {
+            channel: Arc::new(SilentChannel),
+            http: self.http.clone(),
+        };
+        let response = llm.run(&mut self.store).await;
+
+        self.store.context.system_prompt = original_prompt;
+        self.store.context.history = original_history;
+
+        response.map(|resp| resp.content.unwrap_or_default())
     }
 
     async fn handle_command(
@@ -425,15 +620,19 @@ impl Session {
                          \x20 /<skill> [args]         Invoke skill\n\
                          \n\
                          Team\n\
-                         \x20 /team                    Show team roster\n\
-                         \x20 /inbox                   Check lead inbox\n\
-                         \x20 /tasks                   Show task board\n\
+                         \x20 /team                   Show team roster\n\
+                         \x20 /inbox                  Check lead inbox\n\
+                         \x20 /tasks                  Show task board\n\
                          \x20 /worktrees              List worktrees\n\
                          \x20 /events                 Worktree event log\n\
                          \n\
                          Resilience\n\
                          \x20 /profiles               Show API key profiles\n\
-                         \x20 /lanes                   Show lane stats\n\
+                         \x20 /lanes                  Show lane stats\n\
+                         \n\
+                         Scheduler\n\
+                         \x20 /heartbeat              Heartbeat status\n\
+                         \x20 /trigger                Manual heartbeat\n\
                          \n\
                          /help",
                     )
@@ -496,13 +695,15 @@ impl Session {
                 }
             }
             "/compact" => {
-                if self.store.context.history.len() <= 4 {
+                if self.store.context.history.len() <= 2 {
                     channel
                         .send("Too few messages to compact.")
                         .await;
                 } else {
                     let before = self.store.context.history.len();
-                    self.compact().await?;
+                    // L1 first (free), then L3 full compact
+                    Self::micro_compact(&mut self.store);
+                    self.full_compact().await?;
                     let after = self.store.context.history.len();
                     channel
                         .send(&format!(
@@ -814,6 +1015,33 @@ impl Session {
             }
         }
     }
+}
+
+/// Estimate token count from store context (4 chars ≈ 1 token)
+fn estimate_tokens(store: &SharedStore) -> usize {
+    store
+        .context
+        .history
+        .iter()
+        .map(|m| m.content.as_deref().unwrap_or("").len() / 4)
+        .sum::<usize>()
+        + store.context.system_prompt.len() / 4
+}
+
+/// Format messages into a text block for summarization
+fn format_messages_for_summary(messages: &[Message]) -> String {
+    let mut text = String::with_capacity(messages.len() * 200);
+    for msg in messages {
+        let role = match msg.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+        };
+        if let Some(content) = &msg.content {
+            text.push_str(&format!("[{role}]: {content}\n"));
+        }
+    }
+    text
 }
 
 #[cfg(test)]

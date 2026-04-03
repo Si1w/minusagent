@@ -85,19 +85,27 @@ workspace/
 | | `/save` | Save session |
 | | `/load <label>` | Load session |
 | | `/list` | List sessions |
-| | `/compact` | Compact history |
+| | `/compact` | Compact history (L1 micro + L3 full) |
 | **Intelligence** | `/prompt` | Show system prompt |
 | | `/remember <name> <txt>` | Save memory (LLM generates TLDR) |
 | | `/<skill> [args]` | Invoke discovered skill |
+| **Team** | `/team` | Show team roster |
+| | `/inbox` | Check lead inbox |
+| | `/tasks` | Show task board |
+| | `/worktrees` | List worktrees |
+| | `/events` | Worktree event log |
 | **Agents & Routing** | `/agents` | List registered agents |
 | | `/switch <agent>` | Switch to a specific agent |
 | | `/switch off` | Restore default routing |
 | | `/bindings` | List route bindings |
 | | `/route <ch> <peer>` | Test route resolution |
+| **Resilience** | `/profiles` | Show API key profiles |
+| | `/lanes` | Show lane stats |
 | **Scheduler** | `/heartbeat` | Heartbeat status |
-| | `/heartbeat stop` | Stop heartbeat |
 | | `/trigger` | Manual heartbeat |
 | | `/cron` | List cron jobs |
+| | `/cron trigger <id>` | Trigger a cron job |
+| | `/cron reload` | Reload CRON.json |
 | | `/cron stop` | Stop cron service |
 | | `/delivery` | Delivery queue stats |
 | | `/delivery stop` | Stop delivery runner |
@@ -118,6 +126,16 @@ Beyond the CLI TUI, two additional frontends can be started at runtime:
 - **WebSocket** (`/gateway`) — JSON-RPC interface for programmatic access. Supports agent registration, binding management, and message dispatch.
 
 All frontends implement the `Channel` trait and can run concurrently.
+
+## Compaction
+
+Session history is compacted automatically via a 3-layer cascade when token usage exceeds `compact_threshold` (default 87%):
+
+1. **L1 MicroCompact** — Clears old tool-result content in-place. No API call, instant.
+2. **L2 AutoCompact** — Summarizes the oldest 50% of messages via LLM. Circuit breaker trips after `compact_max_failures` (default 3) consecutive failures.
+3. **L3 FullCompact** — Summarizes the entire history and re-injects recently read file paths and active todo items.
+
+Manual `/compact` runs L1 + L3 directly.
 
 ## Resilience
 

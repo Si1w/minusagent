@@ -32,8 +32,14 @@ pub struct Tuning {
     pub max_subagent_turns: usize,
     /// Max CoT turns for teammates
     pub max_teammate_turns: usize,
-    /// Context-window usage ratio triggering compaction
+    /// Context-window usage ratio triggering auto-compact (L2)
     pub compact_threshold: f64,
+    /// Max consecutive auto-compact failures before circuit breaker trips
+    pub compact_max_failures: usize,
+    /// Auto-compact summary budget as ratio of context window (L2)
+    pub compact_summary_ratio: f64,
+    /// Full-compact summary budget as ratio of context window (L3)
+    pub full_compact_summary_ratio: f64,
 
     // ── Timeouts (seconds) ──
     /// Bash command execution timeout
@@ -64,6 +70,8 @@ pub struct Tuning {
     pub bootstrap_max_file_chars: usize,
     /// Max total chars for bootstrap context
     pub bootstrap_max_total_chars: usize,
+    /// Max tracked files in read_file_state before clearing
+    pub max_tracked_files: usize,
     /// Max results returned by glob tool
     pub glob_max_results: usize,
     /// Max matches returned by grep tool
@@ -110,7 +118,10 @@ impl Default for Tuning {
             nag_threshold: 3,
             max_subagent_turns: 30,
             max_teammate_turns: 50,
-            compact_threshold: 0.8,
+            compact_threshold: 0.87,
+            compact_max_failures: 3,
+            compact_summary_ratio: 0.10,
+            full_compact_summary_ratio: 0.25,
 
             bash_timeout_secs: 120,
             bg_timeout_secs: 300,
@@ -126,6 +137,7 @@ impl Default for Tuning {
             max_skills: 150,
             bootstrap_max_file_chars: 20_000,
             bootstrap_max_total_chars: 150_000,
+            max_tracked_files: 1000,
             glob_max_results: 500,
             grep_max_results: 200,
             web_fetch_max_body: 50_000,
