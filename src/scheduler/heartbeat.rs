@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Duration;
 
 use crate::config::tuning;
-use crate::core::store::LLMConfig;
+use crate::engine::store::LLMConfig;
 use crate::intelligence::memory::MemoryStore;
 use crate::intelligence::prompt::format_memory_content;
 use crate::intelligence::utils::{extract_body, parse_frontmatter};

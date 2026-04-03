@@ -11,37 +11,25 @@ Rust agent framework. Everything is a Node (`prep → exec → post`).
 
 ### Configuration
 
-On first run, a `config.json` template is created. Edit it with your LLM provider details:
+On first run, a `config.json` template is created. Configure LLM profiles via CLI commands:
 
-```jsonc
-{
-  "llm": [
-    {
-      "model": "gpt-4o",
-      "base_url": "https://api.openai.com/v1/",
-      "api_key": "$OPENAI_API_KEY",
-      "context_window": 128000
-    }
-  ],
-  "workspace_dir": "./workspace"
-}
+```
+/llm add              # interactive — prompts for model, base_url, api_key, context_window
+/llm                  # list all profiles
+/llm primary <model>  # set primary profile
+/llm rm <model>       # remove a profile
 ```
 
-String values starting with `$` are resolved as environment variables, so secrets can live in your shell profile instead of the config file. Alternatively, put the literal value directly — `config.json` is gitignored.
+The first profile added becomes the primary. Additional profiles are used for auth rotation by the resilience layer.
+
+API keys support `$ENV_VAR` syntax — the value is resolved from your shell environment at runtime, so secrets stay out of the config file. `config.json` is gitignored.
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `llm` | Yes | Array of LLM profiles. First = primary, rest = auth rotation. |
-| `llm[].model` | Yes | Model name |
-| `llm[].base_url` | Yes | OpenAI-compatible API base URL |
-| `llm[].api_key` | Yes | API key (or `$ENV_VAR` reference) |
-| `llm[].context_window` | Yes | Max context window size (tokens) |
 | `workspace_dir` | No | Workspace root for agent discovery (default: `./workspace`) |
 | `discord_token` | No | Discord bot token for `/discord` gateway (or `$ENV_VAR`) |
 | `fallback_models` | No | Array of fallback model names for resilience |
 | `tuning` | No | Runtime-tunable parameters (all have sensible defaults) |
-
-Manage LLM profiles at runtime with `/llm`, `/llm add`, `/llm rm <model>`, `/llm primary <model>`.
 
 ### Build & Run
 
@@ -144,3 +132,84 @@ When multiple LLM profiles are configured in the `llm` array, the resilience lay
 - **Profile rotation** — On auth, billing, or rate-limit failures, automatically rotates to the next available profile with category-specific cooldowns.
 - **Overflow recovery** — On context-window overflow, compacts message history and retries.
 - **Fallback models** — If `fallback_models` is set, tries alternative models when the primary fails.
+
+## SDK Usage
+
+minusagent can be used as a Rust library. Add it as a dependency:
+
+```toml
+[dependencies]
+minusagent = { path = "../minusagent" }
+```
+
+### Gateway (high-level)
+
+The `Gateway` handles routing, session lifecycle, and concurrency. Use `ProtocolChannel` to receive structured events:
+
+```rust
+use std::sync::Arc;
+
+use minusagent::frontend::UserMessage;
+use minusagent::routing::protocol::{ControlEvent, ProtocolChannel};
+
+// Assuming `gateway` is already initialized (see main.rs for setup)
+let (channel, mut rx) = ProtocolChannel::new();
+
+let msg = UserMessage {
+    text: "Hello".into(),
+    sender_id: "user-1".into(),
+    channel: "sdk".into(),
+    account_id: String::new(),
+    guild_id: String::new(),
+};
+
+let result = gateway.dispatch(msg, Arc::new(channel), None).await?;
+
+// Consume the event stream
+while let Some(event) = rx.recv().await {
+    match event {
+        ControlEvent::StreamDelta { text } => print!("{text}"),
+        ControlEvent::ToolRequest { request_id, tool, args } => {
+            // Approve or deny tool execution
+        }
+        ControlEvent::TurnComplete { .. } => break,
+        _ => {}
+    }
+}
+```
+
+### Session (mid-level)
+
+Bypass routing and drive a session directly:
+
+```rust
+use minusagent::engine::session::Session;
+
+let mut session = Session::new(store, lane_lock, heartbeat, profiles, fallback, interrupted)?;
+session.turn("user input", &channel).await?;
+```
+
+### Agent (low-level)
+
+Run a single CoT loop with no session management:
+
+```rust
+use minusagent::engine::agent::Agent;
+
+let agent = Agent;
+agent.run(&mut store, &channel, &http, None).await?;
+```
+
+### Key Types
+
+| Type | Module | Role |
+|------|--------|------|
+| `Gateway` | `frontend::gateway` | High-level dispatcher with routing and session pool |
+| `ProtocolChannel` | `routing::protocol` | Structured event stream for SDK consumers |
+| `ControlEvent` | `routing::protocol` | Server → client events (stream, tool request, completion) |
+| `Session` | `engine::session` | Per-conversation orchestrator |
+| `Agent` | `engine::agent` | Stateless CoT loop |
+| `SharedStore` | `engine::store` | Context (LLM-visible) + SystemState (LLM-invisible) |
+| `Channel` | `frontend` | Trait for custom frontends |
+| `AgentManager` | `intelligence::manager` | Agent registry and workspace discovery |
+| `BindingRouter` | `routing::router` | 5-tier message routing |

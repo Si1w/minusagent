@@ -12,8 +12,8 @@ use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::config::{AppConfig, LLMConfig};
-use crate::core::session::Session;
-use crate::core::store::{Config, Context, SharedStore, SystemState};
+use crate::engine::session::Session;
+use crate::engine::store::{Config, Context, SharedStore, SystemState};
 use crate::team::{BackgroundManager, TaskManager, TeammateManager, TodoManager, WorktreeManager};
 use crate::frontend::{Channel, UserMessage};
 use crate::intelligence::Intelligence;

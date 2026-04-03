@@ -3,8 +3,8 @@ use std::sync::OnceLock;
 use anyhow::Result;
 
 use crate::config::tuning;
-use crate::core::node::Node;
-use crate::core::store::SharedStore;
+use crate::engine::node::Node;
+use crate::engine::store::SharedStore;
 use crate::tool::push_tool_result;
 
 /// Shared HTTP client for web tools (avoids rebuilding connection pool per request)

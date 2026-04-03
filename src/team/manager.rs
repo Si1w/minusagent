@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use crate::core::agent::{CotOptions, cot_loop};
-use crate::core::store::{
+use crate::engine::agent::{CotOptions, cot_loop};
+use crate::engine::store::{
     Config, Context, LLMConfig, Message, Role, SharedStore, SystemState,
 };
 use crate::team::task::{BackgroundManager, TaskManager};

@@ -3,8 +3,8 @@ use std::sync::atomic::AtomicBool;
 
 use anyhow::Result;
 
-use crate::core::agent::Agent;
-use crate::core::store::SharedStore;
+use crate::engine::agent::Agent;
+use crate::engine::store::SharedStore;
 use crate::frontend::Channel;
 use crate::resilience::classify::{FailoverReason, classify_failure};
 use crate::config::tuning;
@@ -221,7 +221,7 @@ impl ResilienceRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::store::{Config, Context, LLMConfig, Message, Role, SystemState};
+    use crate::engine::store::{Config, Context, LLMConfig, Message, Role, SystemState};
     use std::collections::HashMap;
 
     use crate::team::{BackgroundManager, TodoManager};

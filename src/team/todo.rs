@@ -1,8 +1,8 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::core::node::Node;
-use crate::core::store::SharedStore;
+use crate::engine::node::Node;
+use crate::engine::store::SharedStore;
 use crate::tool::push_tool_result;
 
 /// Status of a todo item
@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn test_nag_reminder_triggers_after_3_rounds() {
-        use crate::core::store::{Message, Role};
+        use crate::engine::store::{Message, Role};
 
         let mut store = SharedStore::test_default();
         // Populate todo items so nag can trigger
@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn test_nag_reminder_skipped_when_no_items() {
-        use crate::core::store::{Message, Role};
+        use crate::engine::store::{Message, Role};
 
         let mut store = SharedStore::test_default();
         // No todo items

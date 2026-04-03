@@ -4,24 +4,17 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use std::time::Instant;
 
-mod config;
-mod core;
-mod frontend;
-mod intelligence;
-mod logger;
-mod resilience;
-mod routing;
-mod scheduler;
-mod team;
-mod tool;
-
-use crate::config::{AppConfig, tuning};
-use crate::frontend::cli::Cli;
-use crate::frontend::gateway::{AppState, Gateway};
-use crate::frontend::Channel;
-use crate::intelligence::manager::AgentManager;
-use crate::routing::delivery::{BgOutputSink, OutboundSinks};
-use crate::routing::router::{BindingRouter, BindingTable};
+use minusagent::config::{AppConfig, tuning};
+use minusagent::frontend::cli::Cli;
+use minusagent::frontend::gateway::{AppState, Gateway};
+use minusagent::frontend::repl;
+use minusagent::frontend::stdio;
+use minusagent::frontend::Channel;
+use minusagent::intelligence::manager::AgentManager;
+use minusagent::logger::TuiLogger;
+use minusagent::routing::delivery::{BgOutputSink, OutboundSinks};
+use minusagent::routing::router::{BindingRouter, BindingTable};
+use minusagent::scheduler;
 
 #[tokio::main]
 async fn main() {
@@ -33,7 +26,7 @@ async fn main() {
     if let Some(ws) = &config.workspace_dir {
         mgr.discover_workspace(&ws.join(".agents"));
     }
-    let mgr = std::sync::Arc::new(std::sync::RwLock::new(mgr));
+    let mgr = Arc::new(std::sync::RwLock::new(mgr));
     let mut table = BindingTable::new();
     if let Some(ws) = &config.workspace_dir {
         table.load_file(&ws.join("routes.json"));
@@ -50,12 +43,12 @@ async fn main() {
     let gateway = Arc::new(Gateway::new(state, config).await);
 
     if std::env::args().any(|a| a == "--stdio") {
-        if let Err(e) = frontend::stdio::run(gateway).await {
+        if let Err(e) = stdio::run(gateway).await {
             eprintln!("stdio error: {e}");
         }
     } else {
-        logger::TuiLogger::init();
+        TuiLogger::init();
         let cli: Arc<dyn Channel> = Arc::new(Cli::new());
-        frontend::repl::run(gateway, cli).await;
+        repl::run(gateway, cli).await;
     }
 }

@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
 
-use crate::core::agent::Agent;
-use crate::core::store::{
+use crate::engine::agent::Agent;
+use crate::engine::store::{
     Config, Context, LLMConfig, Message, Role, SharedStore, SystemState,
 };
 use crate::team::{BackgroundManager, TodoManager};
