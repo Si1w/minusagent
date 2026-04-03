@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 
-use crate::core::llm::LLMCall;
-use crate::core::node::Node;
-use crate::core::store::{
+use crate::engine::llm::LLMCall;
+use crate::engine::node::Node;
+use crate::engine::store::{
     Config, Context, LLMConfig, Message, Role, SharedStore, SystemState,
 };
 use crate::config::tuning;

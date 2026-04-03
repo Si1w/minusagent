@@ -30,7 +30,7 @@ Session (per session_key, built from AgentConfig)
 
 ```
 src/
-├── core/           node, agent, llm, session, store
+├── engine/         node, agent, llm, session, store
 ├── intelligence/   manager, bootstrap, skills, memory, prompt, utils
 ├── routing/        router, protocol, delivery
 ├── scheduler/      heartbeat, cron, lane
@@ -40,7 +40,8 @@ src/
 ├── tool/           mod (dispatch), schema, exec, search, web
 ├── config.rs       AppConfig, LLMConfig, Tuning (global OnceLock)
 ├── logger.rs       TUI logger
-└── main.rs         entry point
+├── lib.rs          library root (pub mod re-exports)
+└── main.rs         binary entry point
 ```
 
 ## Documentation
@@ -49,7 +50,7 @@ Detailed per-module documentation lives in `docs/`. **When implementing features
 
 ```
 docs/
-├── core/
+├── engine/
 │   ├── agent.md          CoT loop, subagent runner
 │   ├── context.md        SharedStore, Context, SystemState
 │   ├── llm.md            LLM streaming, request/response

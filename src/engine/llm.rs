@@ -4,8 +4,8 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
-use crate::core::node::Node;
-use crate::core::store::{Message, Role, SharedStore, ToolCall};
+use crate::engine::node::Node;
+use crate::engine::store::{Message, Role, SharedStore, ToolCall};
 use crate::tool::{ToolDefinition, all_tools_filtered};
 use crate::frontend::Channel;
 
@@ -317,7 +317,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::core::store::{Config, Context, LLMConfig, SystemState};
+    use crate::engine::store::{Config, Context, LLMConfig, SystemState};
     use crate::team::{BackgroundManager, TodoManager};
     use crate::frontend::SilentChannel;
     use crate::intelligence::manager::SharedAgents;

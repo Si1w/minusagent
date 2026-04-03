@@ -7,9 +7,9 @@ use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::core::llm::LLMCall;
-use crate::core::node::Node;
-use crate::core::store::{Message, Role, SharedStore};
+use crate::engine::llm::LLMCall;
+use crate::engine::node::Node;
+use crate::engine::store::{Message, Role, SharedStore};
 use crate::frontend::{Channel, SilentChannel};
 use crate::team::TeammateStatus;
 use crate::team::todo::TodoStatus;

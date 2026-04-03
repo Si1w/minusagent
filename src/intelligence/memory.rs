@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::core::node::Node;
-use crate::core::store::SharedStore;
+use crate::engine::node::Node;
+use crate::engine::store::SharedStore;
 use crate::intelligence::utils::discover_files;
 
 /// A discovered memory entry (frontmatter only, body not loaded)

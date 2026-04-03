@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Duration;
 
-use crate::core::store::LLMConfig;
+use crate::engine::store::LLMConfig;
 use crate::routing::delivery::DeliveryHandle;
 use crate::config::tuning;
 use crate::scheduler::{now_secs, run_single_turn};
