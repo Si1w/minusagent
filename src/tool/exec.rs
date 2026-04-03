@@ -166,8 +166,7 @@ impl Node for ReadFile {
     ) -> Result<()> {
         let (content, mtime) = exec_res;
         // Cap to prevent unbounded growth in long sessions
-        const MAX_TRACKED_FILES: usize = 1000;
-        if store.state.read_file_state.len() >= MAX_TRACKED_FILES {
+        if store.state.read_file_state.len() >= tuning().max_tracked_files {
             store.state.read_file_state.clear();
         }
         store.state.read_file_state.insert(prep_res, mtime);

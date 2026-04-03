@@ -26,6 +26,14 @@ use tokio::time::Duration;
 
 const REQUEST_ID_LEN: usize = 8;
 
+/// Common prefix for all forked teammate initial messages.
+///
+/// All teammates share this exact byte sequence at the start of their first
+/// user message. Combined with an identical system prompt (per agent_id),
+/// this enables LLM API byte-level prefix caching — the first teammate's
+/// prompt is cached and subsequent teammates reuse it.
+const FORK_PREFIX: &str = "Fork started — processing in background.";
+
 // ── Message Bus ──────────────────────────────────────────
 
 /// A message in a teammate's inbox
@@ -696,8 +704,6 @@ async fn teammate_loop(
 ) -> Result<()> {
     let (system_prompt, intelligence) = build_teammate_identity(
         agent_id,
-        name,
-        role,
         &agents,
         &llm_config,
     );
@@ -712,7 +718,7 @@ async fn teammate_loop(
             system_prompt,
             history: vec![Message {
                 role: Role::User,
-                content: Some(initial_prompt.to_string()),
+                content: Some(build_fork_message(name, role, initial_prompt)),
                 tool_calls: None,
                 tool_call_id: None,
             }],
@@ -892,20 +898,18 @@ async fn idle_poll(
     }
 }
 
+/// Build the teammate's system prompt and optional Intelligence.
+///
+/// Returns the **base agent identity only** — no teammate-specific context.
+/// All teammates sharing the same `agent_id` produce a byte-identical system
+/// prompt, enabling LLM KV cache prefix reuse across concurrent forks.
+/// Teammate context (name, role) is injected into the initial user message
+/// via [`build_fork_message`] instead.
 fn build_teammate_identity(
     agent_id: &str,
-    name: &str,
-    role: &str,
     agents: &SharedAgents,
     llm_config: &LLMConfig,
 ) -> (String, Option<Intelligence>) {
-    let teammate_ctx = format!(
-        "\n\n---\n\
-         You are teammate '{name}' (role: {role}).\n\
-         Use team_send to message other teammates or 'lead'.\n\
-         Your inbox is checked automatically before each response."
-    );
-
     if !agent_id.is_empty() {
         if let Some(config) = agents.get(agent_id) {
             let ws_dir = if config.workspace_dir.is_empty() {
@@ -929,13 +933,26 @@ fn build_teammate_identity(
                 .map(|i| i.build_prompt())
                 .unwrap_or(config.system_prompt.clone());
 
-            return (format!("{base}{teammate_ctx}"), intelligence);
+            return (base, intelligence);
         }
     }
 
-    (
-        format!("You are a helpful assistant.{teammate_ctx}"),
-        None,
+    ("You are a helpful assistant.".into(), None)
+}
+
+/// Build the initial user message for a forked teammate.
+///
+/// Structure: `FORK_PREFIX` (shared) + teammate context + task prompt.
+/// The shared prefix maximises byte-level cache hits when multiple
+/// teammates are spawned from the same agent.
+fn build_fork_message(name: &str, role: &str, task: &str) -> String {
+    format!(
+        "{FORK_PREFIX}\n\n\
+         You are teammate '{name}' (role: {role}).\n\
+         Use team_send to message other teammates or 'lead'.\n\
+         Your inbox is checked automatically before each response.\n\n\
+         ---\n\n\
+         {task}"
     )
 }
 

@@ -466,6 +466,13 @@ Intelligence
   /remember <name> <txt>  Save memory
   /<skill> [args]         Invoke skill
 
+Team
+  /team                   Show team roster
+  /inbox                  Check lead inbox
+  /tasks                  Show task board
+  /worktrees              List worktrees
+  /events                 Worktree event log
+
 Config
   /llm                    List LLM profiles
   /llm add                Add profile (interactive)
@@ -479,12 +486,17 @@ Agents & Routing
   /bindings               List route bindings
   /route <ch> <peer>      Test route resolution
 
+Resilience
+  /profiles               Show API key profiles
+  /lanes                  Show lane stats
+
 Scheduler
   /heartbeat              Heartbeat status
-  /heartbeat stop         Stop heartbeat
   /trigger                Manual heartbeat
   /cron                   List cron jobs
   /cron stop              Stop cron service
+  /cron trigger <id>      Trigger a cron job
+  /cron reload            Reload CRON.json
   /delivery               Delivery queue stats
   /delivery stop          Stop delivery runner
 

@@ -1,5 +1,5 @@
 ---
-description: Context and SharedStore
+description: Context, SharedStore, and SystemState
 ---
 
 # SharedStore
@@ -36,3 +36,6 @@ Internal data, LLM does not see this:
 - `worktrees` — `Option<WorktreeManager>` git worktree isolation
 - `tool_policy` — `ToolPolicy` per-session tool permission policy
 - `idle_requested` — `bool` set by the `idle` tool to break out of cot_loop
+- `plan_mode` — `bool` agent is in plan-only mode (no execution)
+- `cron` — `Option<CronHandle>` cron service handle
+- `read_file_state` — `HashMap<String, SystemTime>` tracks files read by read_file (path → mtime at read time). Cleared when exceeding `max_tracked_files`. Used by L3 compaction to re-inject context.
