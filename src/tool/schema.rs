@@ -882,13 +882,26 @@ pub fn cron_delete_tool() -> ToolDefinition {
     }
 }
 
-/// All built-in tool definitions for LLM registration
+/// All built-in tool definitions for LLM registration (no filtering)
+#[cfg(test)]
 pub fn all_tools(
     is_subagent: bool,
     has_tasks: bool,
     has_team: bool,
     has_worktrees: bool,
     has_cron: bool,
+) -> Vec<ToolDefinition> {
+    all_tools_filtered(is_subagent, has_tasks, has_team, has_worktrees, has_cron, &[])
+}
+
+/// All built-in tool definitions, excluding denied tools
+pub fn all_tools_filtered(
+    is_subagent: bool,
+    has_tasks: bool,
+    has_team: bool,
+    has_worktrees: bool,
+    has_cron: bool,
+    denied: &[String],
 ) -> Vec<ToolDefinition> {
     let mut tools = vec![
         bash_tool(),
@@ -939,6 +952,9 @@ pub fn all_tools(
         tools.push(cron_list_tool());
         tools.push(cron_create_tool());
         tools.push(cron_delete_tool());
+    }
+    if !denied.is_empty() {
+        tools.retain(|t| !denied.contains(&t.function.name));
     }
     tools
 }

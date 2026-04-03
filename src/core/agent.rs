@@ -226,6 +226,7 @@ pub fn run_subagent(
     agent_id: String,
     agents: SharedAgents,
     tasks: Option<TaskManager>,
+    denied_tools: Vec<String>,
 ) -> Pin<Box<dyn Future<Output = Result<String>> + Send>> {
     Box::pin(async move {
         // Build Intelligence from workspace if available
@@ -264,7 +265,7 @@ pub fn run_subagent(
                 team: None,
                 team_name: None,
                 worktrees: None,
-                tool_policy: ToolPolicy::default(),
+                tool_policy: ToolPolicy::from_denied(&denied_tools),
                 idle_requested: false,
                 plan_mode: false,
                 cron: None,

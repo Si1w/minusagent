@@ -34,6 +34,7 @@ impl AppConfig {
         agents: SharedAgents,
         workspace_dir: Option<&PathBuf>,
         cron: Option<CronHandle>,
+        denied_tools: &[String],
     ) -> SharedStore {
         let tasks = workspace_dir
             .map(|ws| TaskManager::new(ws.join(".tasks")))
@@ -75,7 +76,7 @@ impl AppConfig {
                 team,
                 team_name: None,
                 worktrees,
-                tool_policy: ToolPolicy::default(),
+                tool_policy: ToolPolicy::from_denied(denied_tools),
                 idle_requested: false,
                 plan_mode: false,
                 cron,
@@ -297,7 +298,7 @@ impl Gateway {
         agent_override: Option<&str>,
     ) -> Result<DispatchResult> {
         // 1. Resolve routing
-        let (session_key, system_prompt, model, agent_id, channel_name, ws_dir, shared_agents) =
+        let (session_key, system_prompt, model, agent_id, channel_name, ws_dir, shared_agents, denied_tools) =
         {
             let s = self.state.read().await;
             let result = if let Some(ov) = agent_override {
@@ -311,6 +312,10 @@ impl Gateway {
                 .as_ref()
                 .map(|a| a.system_prompt.clone())
                 .unwrap_or_default();
+            let denied = agent
+                .as_ref()
+                .map(|a| a.denied_tools.clone())
+                .unwrap_or_default();
             let model = agents.effective_model(&result.agent_id);
             let ch = msg.channel.clone();
             let ws: Option<PathBuf> = agent
@@ -319,7 +324,7 @@ impl Gateway {
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from)
                 .or(self.config.workspace_dir.clone());
-            (result.session_key, prompt, model, result.agent_id, ch, ws, agents)
+            (result.session_key, prompt, model, result.agent_id, ch, ws, agents, denied)
         };
 
         // 2. Track session
@@ -366,6 +371,7 @@ impl Gateway {
                     shared_agents.clone(),
                     ws_dir.as_ref(),
                     cron_handle,
+                    &denied_tools,
                 );
 
                 let lane_lock: LaneLock =
@@ -795,6 +801,14 @@ async fn m_agents_register(
             .as_str()
             .unwrap_or("")
             .to_string(),
+        denied_tools: params["denied_tools"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
     };
     let id = normalize_agent_id(&config.id);
     s.router.manager_mut().register(config);

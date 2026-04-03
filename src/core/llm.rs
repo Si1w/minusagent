@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::node::Node;
 use crate::core::store::{Message, Role, SharedStore, ToolCall};
-use crate::tool::{ToolDefinition, all_tools};
+use crate::tool::{ToolDefinition, all_tools_filtered};
 use crate::frontend::Channel;
 
 // Request types
@@ -170,12 +170,14 @@ impl Node for LLMCall {
             });
         }
 
-        let tools = all_tools(
+        let denied = store.state.tool_policy.denied_names();
+        let tools = all_tools_filtered(
             store.state.is_subagent,
             store.state.tasks.is_some(),
             store.state.team.is_some(),
             store.state.worktrees.is_some(),
             store.state.cron.is_some(),
+            &denied,
         );
 
         Ok(LLMRequest {

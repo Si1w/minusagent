@@ -21,9 +21,8 @@ pub enum PermissionMode {
     Trust,
 }
 
-// TODO: wire auto_approve into tool dispatch
-#[allow(dead_code)]
 /// Read-only tools that are auto-approved in `Auto` mode
+#[allow(dead_code)]
 const AUTO_APPROVE_TOOLS: &[&str] = &[
     "read_file",
     "glob",
@@ -40,8 +39,7 @@ const AUTO_APPROVE_TOOLS: &[&str] = &[
 #[derive(Debug, Clone)]
 pub struct ToolPolicy {
     pub mode: PermissionMode,
-    /// Per-tool overrides (tool_name → allow)
-    #[allow(dead_code)]
+    /// Per-tool overrides (tool_name → allow/deny)
     pub overrides: HashMap<String, bool>,
 }
 
@@ -55,6 +53,32 @@ impl Default for ToolPolicy {
 }
 
 impl ToolPolicy {
+    /// Create a policy that denies the specified tools
+    pub fn from_denied(denied: &[String]) -> Self {
+        let mut overrides = HashMap::new();
+        for tool in denied {
+            overrides.insert(tool.clone(), false);
+        }
+        Self {
+            mode: PermissionMode::default(),
+            overrides,
+        }
+    }
+
+    /// Check if a tool is explicitly denied
+    pub fn is_denied(&self, tool: &str) -> bool {
+        self.overrides.get(tool) == Some(&false)
+    }
+
+    /// Return names of all denied tools
+    pub fn denied_names(&self) -> Vec<String> {
+        self.overrides
+            .iter()
+            .filter(|(_, allow)| !**allow)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     /// Check if a tool should be auto-approved without asking
     ///
     /// Returns `Some(true)` to allow, `Some(false)` to deny,

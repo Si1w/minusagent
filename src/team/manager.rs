@@ -702,6 +702,11 @@ async fn teammate_loop(
         &llm_config,
     );
 
+    let denied_tools = agents
+        .get(agent_id)
+        .map(|a| a.denied_tools.clone())
+        .unwrap_or_default();
+
     let mut store = SharedStore {
         context: Context {
             system_prompt,
@@ -723,7 +728,7 @@ async fn teammate_loop(
             team: Some(team.clone()),
             team_name: Some(name.to_string()),
             worktrees: None,
-            tool_policy: ToolPolicy::default(),
+            tool_policy: ToolPolicy::from_denied(&denied_tools),
             idle_requested: false,
             plan_mode: false,
             cron: None,
