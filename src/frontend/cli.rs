@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io;
 use std::sync::Arc;
 
@@ -19,6 +20,9 @@ Welcome to minusagent. Type /help for commands.
 
 struct TuiState {
     output: String,
+    stream_buf: String,
+    output_dirty: bool,
+    cached_display: Option<Text<'static>>,
     input: String,
     cursor: usize,
     scroll: u16,
@@ -35,6 +39,7 @@ impl TuiState {
             // Find a char boundary after the cut point
             let safe = self.output.ceil_char_boundary(cut);
             self.output.drain(..safe);
+            self.output_dirty = true;
         }
     }
 }
@@ -55,6 +60,9 @@ impl Cli {
     pub fn new() -> Self {
         let state = Arc::new(Mutex::new(TuiState {
             output: BANNER.to_string(),
+            stream_buf: String::new(),
+            output_dirty: true,
+            cached_display: None,
             input: String::new(),
             cursor: 0,
             scroll: 0,
@@ -93,13 +101,15 @@ async fn run_event_loop(
             let mut s = state.lock().await;
 
             for entry in crate::logger::TuiLogger::drain() {
-                s.output.push_str(&format!("{entry}\n"));
+                s.output.push_str(&format!("{entry}\n\n"));
+                s.output_dirty = true;
                 s.auto_scroll = true;
             }
 
             for msg in crate::scheduler::drain_bg_output() {
                 s.output.push_str(&msg);
-                s.output.push('\n');
+                s.output.push_str("\n\n");
+                s.output_dirty = true;
                 s.auto_scroll = true;
             }
 
@@ -145,7 +155,8 @@ async fn run_event_loop(
                                 let text = std::mem::take(&mut s.input);
                                 s.cursor = 0;
                                 s.output
-                                    .push_str(&format!("> {text}\n"));
+                                    .push_str(&format!("❯ {text}\n\n"));
+                                s.output_dirty = true;
                                 s.auto_scroll = true;
                                 if let Some(tx) = s.input_sender.take() {
                                     let _ = tx.send(text);
@@ -216,18 +227,52 @@ fn render(state: &mut TuiState, frame: &mut Frame) {
     let inner_width = block.inner(chunks[0]).width;
     let inner_height = block.inner(chunks[0]).height;
 
-    let total_lines: u16 = state
-        .output
-        .lines()
+    if state.output_dirty || state.cached_display.is_none() {
+        let parsed = tui_markdown::from_str(&state.output);
+        let owned_lines: Vec<Line<'static>> = parsed
+            .lines
+            .into_iter()
+            .map(|line| {
+                Line::from(
+                    line.spans
+                        .into_iter()
+                        .map(|s| {
+                            Span::styled(
+                                Cow::<'static, str>::Owned(s.content.into_owned()),
+                                s.style,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        state.cached_display = Some(Text::from(owned_lines));
+        state.output_dirty = false;
+    }
+    let mut display_text = state.cached_display.clone().unwrap();
+    if !state.stream_buf.is_empty() {
+        for line in state.stream_buf.split('\n') {
+            display_text.push_line(Line::raw(line));
+        }
+    }
+    use unicode_width::UnicodeWidthStr;
+    let total_lines: u16 = display_text
+        .lines
+        .iter()
         .map(|line| {
             let w = inner_width.max(1) as usize;
-            1 + line.len().saturating_sub(1) / w
+            let line_width: usize = line
+                .spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            1 + line_width.saturating_sub(1) / w
         })
         .sum::<usize>() as u16;
     let max_scroll = total_lines.saturating_sub(inner_height);
 
     let output =
-        Paragraph::new(state.output.as_str()).wrap(Wrap { trim: false });
+        Paragraph::new(display_text).wrap(Wrap { trim: false });
 
     if state.auto_scroll {
         state.scroll = max_scroll;
@@ -392,6 +437,7 @@ impl Channel for Cli {
             state.output.push('\n');
         }
         state.output.push('\n');
+        state.output_dirty = true;
         state.trim_output();
         state.auto_scroll = true;
     }
@@ -399,8 +445,12 @@ impl Channel for Cli {
     async fn confirm(&self, command: &str) -> bool {
         {
             let mut state = self.state.lock().await;
+            if !state.output.ends_with('\n') {
+                state.output.push('\n');
+            }
             state.output
                 .push_str(&format!("Execute: `{command}` (y/n)\n"));
+            state.output_dirty = true;
             state.auto_scroll = true;
         }
 
@@ -415,8 +465,7 @@ impl Channel for Cli {
 
     async fn on_stream_chunk(&self, chunk: &str) {
         let mut state = self.state.lock().await;
-        state.output.push_str(chunk);
-        state.trim_output();
+        state.stream_buf.push_str(chunk);
         state.auto_scroll = true;
     }
 
@@ -425,7 +474,15 @@ impl Channel for Cli {
         if !state.output.ends_with('\n') {
             state.output.push('\n');
         }
+        let stream = std::mem::take(&mut state.stream_buf);
+        state.output.push_str(&stream);
+        if !state.output.ends_with('\n') {
+            state.output.push('\n');
+        }
         state.output.push('\n');
+        state.output_dirty = true;
+        state.trim_output();
         state.auto_scroll = true;
     }
 }
+
