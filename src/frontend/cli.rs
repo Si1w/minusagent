@@ -159,6 +159,15 @@ async fn run_event_loop(
                         KeyCode::Down => {
                             s.scroll = s.scroll.saturating_add(1);
                         }
+                        KeyCode::Esc => {
+                            if s.input_sender.is_some() {
+                                s.input.clear();
+                                s.cursor = 0;
+                                if let Some(tx) = s.input_sender.take() {
+                                    let _ = tx.send(String::new());
+                                }
+                            }
+                        }
                         KeyCode::Home => s.cursor = 0,
                         KeyCode::End => {
                             s.cursor = s.input.chars().count();
