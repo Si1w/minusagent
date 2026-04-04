@@ -43,7 +43,15 @@ impl Node for WebFetch {
             return Ok(format!("HTTP {status}"));
         }
 
+        let is_html = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.contains("text/html"));
+
         let body = resp.text().await?;
+        let body = if is_html { html_to_markdown(&body) } else { body };
+
         let max = self.max_length.unwrap_or(tuning().web_fetch_max_body);
         if body.len() > max {
             Ok(format!(
@@ -114,6 +122,45 @@ impl Node for WebSearch {
         push_tool_result(store, &self.call_id, exec_res);
         Ok(())
     }
+}
+
+/// Shared HTML-to-Markdown converter (avoids rebuilding per call)
+fn md_converter() -> &'static htmd::HtmlToMarkdown {
+    static CONVERTER: OnceLock<htmd::HtmlToMarkdown> = OnceLock::new();
+    CONVERTER.get_or_init(|| {
+        htmd::HtmlToMarkdown::builder()
+            .skip_tags(vec!["script", "style", "nav", "footer", "header"])
+            .build()
+    })
+}
+
+/// Convert HTML to Markdown for LLM-friendly output
+fn html_to_markdown(html: &str) -> String {
+    match md_converter().convert(html) {
+        Ok(md) => collapse_blank_lines(&md),
+        Err(_) => strip_tags(html),
+    }
+}
+
+/// Collapse 3+ consecutive blank lines into 2
+fn collapse_blank_lines(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut blank_count = 0;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            blank_count += 1;
+            if blank_count <= 2 {
+                result.push('\n');
+            }
+        } else {
+            blank_count = 0;
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    let end = result.trim_end().len();
+    result.truncate(end);
+    result
 }
 
 /// Extract search results from DuckDuckGo HTML response
@@ -208,5 +255,53 @@ mod tests {
     #[test]
     fn test_parse_ddg_results_empty() {
         assert_eq!(parse_ddg_results("<html></html>"), "");
+    }
+
+    #[test]
+    fn test_html_to_markdown() {
+        let html = r#"
+        <html>
+        <head><style>body{color:red}</style><script>alert(1)</script></head>
+        <body>
+            <nav><a href="/">Home</a></nav>
+            <h1>Hello World</h1>
+            <p>This is a <strong>test</strong> paragraph.</p>
+            <ul><li>Item 1</li><li>Item 2</li></ul>
+            <footer>Copyright 2025</footer>
+        </body>
+        </html>"#;
+        let md = html_to_markdown(html);
+        assert!(md.contains("# Hello World"), "should convert h1: {md}");
+        assert!(md.contains("**test**"), "should convert bold: {md}");
+        assert!(md.contains("Item 1"), "should keep list items: {md}");
+        assert!(!md.contains("alert(1)"), "should skip script: {md}");
+        assert!(!md.contains("color:red"), "should skip style: {md}");
+    }
+
+    #[test]
+    fn test_collapse_blank_lines() {
+        let input = "a\n\n\n\n\nb";
+        let result = collapse_blank_lines(input);
+        assert_eq!(result, "a\n\n\nb");
+    }
+
+    #[tokio::test]
+    async fn test_web_fetch_html_to_markdown() {
+        let resp = reqwest::Client::new()
+            .get("https://example.com")
+            .send()
+            .await
+            .expect("failed to fetch example.com");
+        let is_html = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.contains("text/html"));
+        assert!(is_html, "example.com should return HTML");
+
+        let body = resp.text().await.unwrap();
+        let md = html_to_markdown(&body);
+        assert!(md.contains("Example Domain"), "should contain title: {md}");
+        assert!(!md.contains("<h1>"), "should not contain raw HTML tags: {md}");
     }
 }
