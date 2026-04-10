@@ -12,34 +12,43 @@ use crate::team::TeammateStatus;
 
 use super::compact;
 
-const HELP_TEXT: &str = "Sessions\n\
-                         \x20 /new <label>            New session\n\
-                         \x20 /save                   Save session\n\
-                         \x20 /load <label>           Load session\n\
-                         \x20 /list                   List sessions\n\
-                         \x20 /compact                Compact history\n\
-                         \n\
-                         Intelligence\n\
-                         \x20 /prompt                 Show system prompt\n\
-                         \x20 /remember <name> <txt>  Save memory\n\
-                         \x20 /<skill> [args]         Invoke skill\n\
-                         \n\
-                         Team\n\
-                         \x20 /team                   Show team roster\n\
-                         \x20 /inbox                  Check lead inbox\n\
-                         \x20 /tasks                  Show task board\n\
-                         \x20 /worktrees              List worktrees\n\
-                         \x20 /events                 Worktree event log\n\
-                         \n\
-                         Resilience\n\
-                         \x20 /profiles               Show API key profiles\n\
-                         \x20 /lanes                  Show lane stats\n\
-                         \n\
-                         Scheduler\n\
-                         \x20 /heartbeat              Heartbeat status\n\
-                         \x20 /trigger                Manual heartbeat\n\
-                         \n\
-                         /help";
+const HELP_TEXT: &str = "\
+## Sessions
+
+- `/new <label>` — new session
+- `/save` — save current session
+- `/load <label>` — load session
+- `/list` — list sessions
+- `/compact` — compact history
+
+## Intelligence
+
+- `/prompt` — show system prompt
+- `/remember <name> <txt>` — save memory
+- `/<skill> [args]` — invoke skill
+
+## Team
+
+- `/team` — show team roster
+- `/inbox` — check lead inbox
+- `/tasks` — show task board
+- `/worktrees` — list worktrees
+- `/events` — worktree event log
+
+## Resilience
+
+- `/profiles` — show API key profiles
+- `/lanes` — show lane stats
+
+## Scheduler
+
+- `/heartbeat` — heartbeat status
+- `/trigger` — manual heartbeat
+
+## Misc
+
+- `/help` — show this help
+";
 
 pub(super) async fn handle_command(
     session: &mut Session,
