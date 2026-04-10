@@ -1,7 +1,7 @@
 use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
 use crate::frontend::UserMessage;
-use crate::intelligence::manager::{AgentManager, SharedAgents, normalize_agent_id};
+use crate::intelligence::manager::{AgentManager, DmScope, SharedAgents, normalize_agent_id};
 use crate::routing::delivery::OutboundSinks;
 
 /// Routing decision result
@@ -25,11 +25,11 @@ pub trait Router: Send + Sync {
 /// A routing rule that maps a match condition to an agent
 ///
 /// Tiers (lower = more specific, matched first):
-/// 1. peer_id — route a specific user
-/// 2. guild_id — route by server/guild
-/// 3. account_id — route by bot account
-/// 4. channel — route by entire channel type
-/// 5. default — catch-all fallback
+/// 1. `peer_id` - route a specific user
+/// 2. `guild_id` - route by server/guild
+/// 3. `account_id` - route by bot account
+/// 4. `channel` - route by entire channel type
+/// 5. `default` - catch-all fallback
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Binding {
     pub agent_id: String,
@@ -47,6 +47,7 @@ pub struct BindingTable {
 
 impl BindingTable {
     /// Create an empty binding table
+    #[must_use]
     pub fn new() -> Self {
         Self {
             bindings: Vec::new(),
@@ -62,9 +63,8 @@ impl BindingTable {
     ///
     /// * `path` - Path to a JSON file containing an array of bindings
     pub fn load_file(&mut self, path: &std::path::Path) {
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => return,
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return;
         };
         let bindings: Vec<Binding> = match serde_json::from_str(&content) {
             Ok(b) => b,
@@ -79,6 +79,7 @@ impl BindingTable {
     }
 
     /// List all bindings
+    #[must_use]
     pub fn list(&self) -> &[Binding] {
         &self.bindings
     }
@@ -90,28 +91,21 @@ impl BindingTable {
             .sort_by(|a, b| a.tier.cmp(&b.tier).then(b.priority.cmp(&a.priority)));
     }
 
-    /// Remove a binding by (agent_id, match_key, match_value)
+    /// Remove a binding by (`agent_id`, `match_key`, `match_value`)
     ///
     /// # Arguments
     ///
     /// * `agent_id` - Agent to match
-    /// * `match_key` - Key to match (e.g. "peer_id", "channel")
+    /// * `match_key` - Key to match (e.g. `peer_id`, `channel`)
     /// * `match_value` - Value to match
     ///
     /// # Returns
     ///
     /// `true` if a binding was removed.
-    pub fn remove(
-        &mut self,
-        agent_id: &str,
-        match_key: &str,
-        match_value: &str,
-    ) -> bool {
+    pub fn remove(&mut self, agent_id: &str, match_key: &str, match_value: &str) -> bool {
         let before = self.bindings.len();
         self.bindings.retain(|b| {
-            !(b.agent_id == agent_id
-                && b.match_key == match_key
-                && b.match_value == match_value)
+            !(b.agent_id == agent_id && b.match_key == match_key && b.match_value == match_value)
         });
         self.bindings.len() < before
     }
@@ -128,6 +122,7 @@ impl BindingTable {
     /// # Returns
     ///
     /// The first matched binding, or `None` if no binding matches.
+    #[must_use]
     pub fn resolve_msg(
         &self,
         channel: &str,
@@ -158,7 +153,13 @@ impl BindingTable {
     }
 }
 
-/// Build a session key based on dm_scope
+impl Default for BindingTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Build a session key based on `DmScope`
 ///
 /// # Arguments
 ///
@@ -171,16 +172,17 @@ impl BindingTable {
 /// # Returns
 ///
 /// Session key string. Scopes:
-/// - `main`                     → `agent:{id}:main`
-/// - `per-peer`                 → `agent:{id}:direct:{peer}`
-/// - `per-channel-peer`         → `agent:{id}:{ch}:direct:{peer}`
-/// - `per-account-channel-peer` → `agent:{id}:{ch}:{acc}:direct:{peer}`
+/// - `DmScope::Main` -> `agent:{id}:main`
+/// - `DmScope::PerPeer` -> `agent:{id}:direct:{peer}`
+/// - `DmScope::PerChannelPeer` -> `agent:{id}:{ch}:direct:{peer}`
+/// - `DmScope::PerAccountChannelPeer` -> `agent:{id}:{ch}:{acc}:direct:{peer}`
+#[must_use]
 pub fn build_session_key(
     agent_id: &str,
     channel: &str,
     account_id: &str,
     peer_id: &str,
-    dm_scope: &str,
+    dm_scope: DmScope,
 ) -> String {
     let aid = normalize_agent_id(agent_id);
     let ch = if channel.is_empty() {
@@ -196,22 +198,22 @@ pub fn build_session_key(
 
     if !peer_id.is_empty() {
         match dm_scope {
-            "per-account-channel-peer" => {
+            DmScope::PerAccountChannelPeer => {
                 return format!("agent:{aid}:{ch}:{acc}:direct:{peer_id}");
             }
-            "per-channel-peer" => {
+            DmScope::PerChannelPeer => {
                 return format!("agent:{aid}:{ch}:direct:{peer_id}");
             }
-            "per-peer" => {
+            DmScope::PerPeer => {
                 return format!("agent:{aid}:direct:{peer_id}");
             }
-            _ => {}
+            DmScope::Main => {}
         }
     }
     format!("agent:{aid}:main")
 }
 
-/// Router backed by a BindingTable and AgentManager
+/// Router backed by a `BindingTable` and `AgentManager`
 ///
 /// Falls back to `default_agent_id` when no binding matches.
 /// Also holds outbound sink registry for delivering background output
@@ -252,6 +254,7 @@ impl BindingRouter {
     }
 
     /// Read access to the binding table
+    #[must_use]
     pub fn table(&self) -> &BindingTable {
         &self.table
     }
@@ -265,11 +268,13 @@ impl BindingRouter {
     }
 
     /// Read-only shared handle to the agent registry
+    #[must_use]
     pub fn shared_agents(&self) -> SharedAgents {
         SharedAgents::new(self.mgr.clone())
     }
 
     /// Access to the outbound sink registry
+    #[must_use]
     pub fn outbound(&self) -> &Arc<OutboundSinks> {
         &self.outbound
     }
@@ -283,8 +288,7 @@ impl BindingRouter {
         });
         let dm_scope = mgr
             .get(agent_id)
-            .map(|a| a.dm_scope.as_str())
-            .unwrap_or("per-peer");
+            .map_or(DmScope::default(), |agent| agent.dm_scope);
 
         let session_key = build_session_key(
             agent_id,
@@ -305,28 +309,20 @@ impl Router for BindingRouter {
     fn resolve(&self, msg: &UserMessage) -> RouteResult {
         let agent_id = self
             .table
-            .resolve_msg(
-                &msg.channel,
-                &msg.account_id,
-                &msg.guild_id,
-                &msg.sender_id,
-            )
-            .map(|b| b.agent_id.clone())
-            .unwrap_or_else(|| self.default_agent_id.clone());
+            .resolve_msg(&msg.channel, &msg.account_id, &msg.guild_id, &msg.sender_id)
+            .map_or_else(
+                || self.default_agent_id.clone(),
+                |binding| binding.agent_id.clone(),
+            );
 
         self.build_result(&agent_id, msg)
     }
 
-    fn resolve_explicit(
-        &self,
-        agent_id: &str,
-        msg: &UserMessage,
-    ) -> RouteResult {
+    fn resolve_explicit(&self, agent_id: &str, msg: &UserMessage) -> RouteResult {
         let aid = normalize_agent_id(agent_id);
         self.build_result(&aid, msg)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -454,25 +450,25 @@ mod tests {
 
     #[test]
     fn test_session_key_per_peer() {
-        let sk = build_session_key("luna", "discord", "", "user1", "per-peer");
+        let sk = build_session_key("luna", "discord", "", "user1", DmScope::PerPeer);
         assert_eq!(sk, "agent:luna:direct:user1");
     }
 
     #[test]
     fn test_session_key_per_channel_peer() {
-        let sk = build_session_key("luna", "discord", "", "user1", "per-channel-peer");
+        let sk = build_session_key("luna", "discord", "", "user1", DmScope::PerChannelPeer);
         assert_eq!(sk, "agent:luna:discord:direct:user1");
     }
 
     #[test]
     fn test_session_key_main() {
-        let sk = build_session_key("luna", "discord", "", "user1", "main");
+        let sk = build_session_key("luna", "discord", "", "user1", DmScope::Main);
         assert_eq!(sk, "agent:luna:main");
     }
 
     #[test]
     fn test_session_key_no_peer() {
-        let sk = build_session_key("luna", "discord", "", "", "per-peer");
+        let sk = build_session_key("luna", "discord", "", "", DmScope::PerPeer);
         assert_eq!(sk, "agent:luna:main");
     }
 
@@ -486,7 +482,7 @@ mod tests {
             name: "Luna".into(),
             system_prompt: String::new(),
             model: String::new(),
-            dm_scope: "per-peer".into(),
+            dm_scope: DmScope::PerPeer,
             workspace_dir: String::new(),
             denied_tools: Vec::new(),
         });
@@ -495,7 +491,7 @@ mod tests {
             name: "Sage".into(),
             system_prompt: String::new(),
             model: String::new(),
-            dm_scope: "per-channel-peer".into(),
+            dm_scope: DmScope::PerChannelPeer,
             workspace_dir: String::new(),
             denied_tools: Vec::new(),
         });
@@ -546,7 +542,7 @@ mod tests {
             name: "Sage".into(),
             system_prompt: String::new(),
             model: String::new(),
-            dm_scope: "per-channel-peer".into(),
+            dm_scope: DmScope::PerChannelPeer,
             workspace_dir: String::new(),
             denied_tools: Vec::new(),
         });

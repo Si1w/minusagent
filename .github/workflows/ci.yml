@@ -13,6 +13,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
@@ -21,3 +23,11 @@ jobs:
 
       - name: Test
         run: cargo test
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Rustdoc
+        run: cargo doc --no-deps --lib
+        env:
+          RUSTDOCFLAGS: -D warnings

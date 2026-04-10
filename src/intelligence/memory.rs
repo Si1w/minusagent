@@ -27,6 +27,7 @@ pub struct MemoryStore {
 
 impl MemoryStore {
     /// Create a new memory store for the given directory
+    #[must_use]
     pub fn new(memory_dir: &Path) -> Self {
         Self {
             memory_dir: memory_dir.to_path_buf(),
@@ -35,6 +36,7 @@ impl MemoryStore {
     }
 
     /// Return the memory directory path
+    #[must_use]
     pub fn dir(&self) -> &Path {
         &self.memory_dir
     }
@@ -47,20 +49,26 @@ impl MemoryStore {
                 Some(t) if !t.is_empty() => t.clone(),
                 _ => continue,
             };
-            let name = f.meta
+            let name = f
+                .meta
                 .get("id")
                 .filter(|s| !s.is_empty())
                 .cloned()
                 .unwrap_or(f.name);
 
-            seen.insert(name.clone(), MemoryEntry { name, tldr, path: f.path });
+            seen.insert(
+                name.clone(),
+                MemoryEntry {
+                    name,
+                    tldr,
+                    path: f.path,
+                },
+            );
         }
         self.entries = seen.into_values().collect();
         self.entries.sort_by(|a, b| a.name.cmp(&b.name));
     }
-
 }
-
 
 /// Node that saves a memory with an LLM-generated TLDR
 ///
@@ -75,7 +83,7 @@ pub struct MemoryWrite {
     pub http: reqwest::Client,
 }
 
-/// Prepared inputs for MemoryWrite execution
+/// Prepared inputs for `MemoryWrite` execution
 #[derive(Clone)]
 pub struct MemoryWritePrep {
     content: String,
@@ -86,7 +94,7 @@ pub struct MemoryWritePrep {
     llm_model: String,
 }
 
-/// Result of MemoryWrite execution
+/// Result of `MemoryWrite` execution
 #[derive(Clone)]
 pub struct MemoryWriteResult {
     pub name: String,
@@ -104,10 +112,7 @@ impl Node for MemoryWrite {
             content: self.content.clone(),
             name: self.name.clone(),
             memory_dir: self.memory_dir.clone(),
-            llm_url: format!(
-                "{}/chat/completions",
-                config.base_url.trim_end_matches('/')
-            ),
+            llm_url: format!("{}/chat/completions", config.base_url.trim_end_matches('/')),
             llm_api_key: config.api_key.clone(),
             llm_model: config.model.clone(),
         })
@@ -130,12 +135,7 @@ impl Node for MemoryWrite {
         let safe_name = prep.name.replace(['/', '\\', '.'], "_");
         let path = prep.memory_dir.join(format!("{safe_name}.md"));
         // Sanitize TLDR to single line
-        let tldr = tldr
-            .lines()
-            .next()
-            .unwrap_or(&tldr)
-            .trim()
-            .to_string();
+        let tldr = tldr.lines().next().unwrap_or(&tldr).trim().to_string();
 
         let escaped_tldr = tldr.replace(':', "：");
         let file_content = format!(
@@ -234,11 +234,7 @@ mod tests {
             "---\nid: dark_mode\ntldr: User prefers dark mode\n---\nDetailed info.",
         )
         .unwrap();
-        fs::write(
-            dir.path().join("no_frontmatter.md"),
-            "Just plain text.",
-        )
-        .unwrap();
+        fs::write(dir.path().join("no_frontmatter.md"), "Just plain text.").unwrap();
 
         let mut store = MemoryStore::new(dir.path());
         store.discover();
@@ -248,7 +244,7 @@ mod tests {
         assert_eq!(store.entries[0].tldr, "User prefers dark mode");
     }
 
-#[test]
+    #[test]
     fn test_dir() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(dir.path());

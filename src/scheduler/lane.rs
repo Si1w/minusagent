@@ -26,6 +26,7 @@ pub struct CommandQueue {
 }
 
 impl CommandQueue {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             lanes: Mutex::new(HashMap::new()),
@@ -85,6 +86,12 @@ impl CommandQueue {
             });
         }
         stats
+    }
+}
+
+impl Default for CommandQueue {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -36,24 +36,16 @@ const AUTO_APPROVE_TOOLS: &[&str] = &[
 ];
 
 /// Per-session tool permission policy
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ToolPolicy {
     pub mode: PermissionMode,
-    /// Per-tool overrides (tool_name → allow/deny)
+    /// Per-tool overrides (`tool_name` -> allow/deny)
     pub overrides: HashMap<String, bool>,
-}
-
-impl Default for ToolPolicy {
-    fn default() -> Self {
-        Self {
-            mode: PermissionMode::default(),
-            overrides: HashMap::new(),
-        }
-    }
 }
 
 impl ToolPolicy {
     /// Create a policy that denies the specified tools
+    #[must_use]
     pub fn from_denied(denied: &[String]) -> Self {
         let mut overrides = HashMap::new();
         for tool in denied {
@@ -66,11 +58,13 @@ impl ToolPolicy {
     }
 
     /// Check if a tool is explicitly denied
+    #[must_use]
     pub fn is_denied(&self, tool: &str) -> bool {
         self.overrides.get(tool) == Some(&false)
     }
 
     /// Return names of all denied tools
+    #[must_use]
     pub fn denied_names(&self) -> Vec<String> {
         self.overrides
             .iter()
@@ -84,6 +78,7 @@ impl ToolPolicy {
     /// Returns `Some(true)` to allow, `Some(false)` to deny,
     /// `None` to defer to `channel.confirm()`.
     #[allow(dead_code)]
+    #[must_use]
     pub fn auto_approve(&self, tool: &str) -> Option<bool> {
         if let Some(&allow) = self.overrides.get(tool) {
             return Some(allow);
@@ -132,24 +127,15 @@ pub enum ControlMessage {
     /// Interrupt current agent execution
     Interrupt,
     /// Switch LLM model
-    ModelSwitch {
-        model: String,
-    },
+    ModelSwitch { model: String },
     /// Query context window usage
     ContextUsage,
     /// Remove last N messages from history
-    Rewind {
-        count: usize,
-    },
+    Rewind { count: usize },
     /// Respond to a tool permission request
-    ToolResponse {
-        request_id: String,
-        allow: bool,
-    },
+    ToolResponse { request_id: String, allow: bool },
     /// Set permission mode for tool execution
-    SetPermissionMode {
-        mode: PermissionMode,
-    },
+    SetPermissionMode { mode: PermissionMode },
 }
 
 // ── Server → Client ─────────────────────────────────────────
@@ -165,10 +151,8 @@ pub enum ControlEvent {
         model: String,
     },
     /// Streaming LLM output chunk
-    StreamDelta {
-        text: String,
-    },
-    /// Tool permission request (can_use_tool)
+    StreamDelta { text: String },
+    /// Tool permission request (`can_use_tool`)
     ToolRequest {
         request_id: String,
         tool: String,
@@ -193,15 +177,9 @@ pub enum ControlEvent {
         history_messages: usize,
     },
     /// Messages rewound
-    Rewound {
-        removed: usize,
-        remaining: usize,
-    },
+    Rewound { removed: usize, remaining: usize },
     /// Error
-    Error {
-        code: i32,
-        message: String,
-    },
+    Error { code: i32, message: String },
 }
 
 // ── Session-level control ───────────────────────────────────
@@ -210,7 +188,7 @@ pub enum ControlEvent {
 ///
 /// These require access to session state and are sent via the
 /// session's mpsc channel alongside regular turns.
-/// Note: Interrupt is handled at the gateway level (sets AtomicBool
+/// Note: Interrupt is handled at the gateway level (sets `AtomicBool`
 /// directly) and is not part of this enum.
 #[derive(Debug)]
 pub enum SessionControl {
@@ -240,6 +218,7 @@ impl ProtocolChannel {
     /// Create a new protocol channel
     ///
     /// Returns the channel and an event receiver for consuming outbound events.
+    #[must_use]
     pub fn new() -> (Self, mpsc::Receiver<ControlEvent>) {
         let (events_tx, events_rx) = mpsc::channel(256);
         let channel = Self {
@@ -271,9 +250,12 @@ impl Channel for ProtocolChannel {
 
     async fn send(&self, text: &str) {
         if !text.is_empty() {
-            let _ = self.events_tx.send(ControlEvent::TurnComplete {
-                text: Some(text.to_string()),
-            }).await;
+            let _ = self
+                .events_tx
+                .send(ControlEvent::TurnComplete {
+                    text: Some(text.to_string()),
+                })
+                .await;
         }
     }
 
@@ -282,11 +264,7 @@ impl Channel for ProtocolChannel {
             .await
     }
 
-    async fn can_use_tool(
-        &self,
-        tool: &str,
-        args: &serde_json::Value,
-    ) -> bool {
+    async fn can_use_tool(&self, tool: &str, args: &serde_json::Value) -> bool {
         let request_id = uuid::Uuid::new_v4().to_string()[..12].to_string();
         let (tx, rx) = oneshot::channel();
 
@@ -295,20 +273,26 @@ impl Channel for ProtocolChannel {
             .await
             .insert(request_id.clone(), tx);
 
-        let _ = self.events_tx.send(ControlEvent::ToolRequest {
-            request_id,
-            tool: tool.to_string(),
-            args: args.clone(),
-        }).await;
+        let _ = self
+            .events_tx
+            .send(ControlEvent::ToolRequest {
+                request_id,
+                tool: tool.to_string(),
+                args: args.clone(),
+            })
+            .await;
 
         // Wait for client response; deny on channel drop
         rx.await.unwrap_or(false)
     }
 
     async fn on_stream_chunk(&self, chunk: &str) {
-        let _ = self.events_tx.send(ControlEvent::StreamDelta {
-            text: chunk.to_string(),
-        }).await;
+        let _ = self
+            .events_tx
+            .send(ControlEvent::StreamDelta {
+                text: chunk.to_string(),
+            })
+            .await;
     }
 
     async fn flush(&self) {}

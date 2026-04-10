@@ -19,12 +19,13 @@ pub enum FailoverReason {
 
 impl FailoverReason {
     /// Default cooldown in seconds for this failure category
+    #[must_use]
     pub fn default_cooldown_secs(&self) -> u64 {
         let t = crate::config::tuning();
         match self {
-            Self::Auth | Self::Billing => t.auth_cooldown_secs,
-            Self::RateLimit => t.rate_limit_cooldown_secs,
-            Self::Timeout => t.timeout_cooldown_secs,
+            Self::Auth | Self::Billing => t.resilience.auth_cooldown_secs,
+            Self::RateLimit => t.resilience.rate_limit_cooldown_secs,
+            Self::Timeout => t.resilience.timeout_cooldown_secs,
             Self::Overflow | Self::Unknown => 0,
         }
     }
@@ -44,13 +45,18 @@ impl fmt::Display for FailoverReason {
 }
 
 /// Classify an error by matching known patterns in its message
+#[must_use]
 pub fn classify_failure(err: &anyhow::Error) -> FailoverReason {
     let msg = err.to_string().to_lowercase();
 
     if msg.contains("429") || msg.contains("rate") || msg.contains("too many") {
         return FailoverReason::RateLimit;
     }
-    if msg.contains("401") || msg.contains("auth") || msg.contains("invalid key") || msg.contains("invalid api key") {
+    if msg.contains("401")
+        || msg.contains("auth")
+        || msg.contains("invalid key")
+        || msg.contains("invalid api key")
+    {
         return FailoverReason::Auth;
     }
     if msg.contains("timeout") || msg.contains("timed out") || msg.contains("deadline") {
@@ -59,8 +65,11 @@ pub fn classify_failure(err: &anyhow::Error) -> FailoverReason {
     if msg.contains("402") || msg.contains("billing") || msg.contains("quota") {
         return FailoverReason::Billing;
     }
-    if msg.contains("context") || msg.contains("context_length") || msg.contains("overflow")
-        || msg.contains("too many tokens") || msg.contains("maximum context")
+    if msg.contains("context")
+        || msg.contains("context_length")
+        || msg.contains("overflow")
+        || msg.contains("too many tokens")
+        || msg.contains("maximum context")
     {
         return FailoverReason::Overflow;
     }

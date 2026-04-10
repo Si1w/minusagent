@@ -11,7 +11,7 @@ Rust agent framework. Everything is a Node (`prep → exec → post`).
 
 ### Configuration
 
-On first run, a `config.json` template is created. Configure LLM profiles via CLI commands:
+On first run, a `config.toml` template is created. Configure LLM profiles via CLI commands:
 
 ```
 /llm add              # interactive — prompts for model, base_url, api_key, context_window
@@ -22,14 +22,17 @@ On first run, a `config.json` template is created. Configure LLM profiles via CL
 
 The first profile added becomes the primary. Additional profiles are used for auth rotation by the resilience layer.
 
-API keys support `$ENV_VAR` syntax — the value is resolved from your shell environment at runtime, so secrets stay out of the config file. `config.json` is gitignored.
+API keys support `$ENV_VAR` syntax — the value is resolved from your shell environment at runtime, so secrets stay out of the config file.
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `workspace_dir` | No | Workspace root for agent discovery (default: `./workspace`) |
-| `discord_token` | No | Discord bot token for `/discord` gateway (or `$ENV_VAR`) |
-| `fallback_models` | No | Array of fallback model names for resilience |
-| `tuning` | No | Runtime-tunable parameters (all have sensible defaults) |
+| Section | Required | Description |
+|---------|----------|-------------|
+| `[llm]` | Yes | LLM provider profiles + `fallback_models` for resilience |
+| `[workspace]` | No | Workspace root for agent discovery (default: `./workspace`) |
+| `[frontend.startup]` | No | Default frontend mode (`repl` or `stdio`) |
+| `[frontend.discord]` | No | Discord bot token for `/discord` gateway (or `$ENV_VAR`) |
+| `[frontend.websocket]` | No | WebSocket gateway host and port |
+| `[services.*]` | No | Per-service autostart policy (`cron`, `delivery`, `discord`, `websocket`) |
+| `[tuning.*]` | No | Runtime-tunable parameters (all have sensible defaults) |
 
 ### Build & Run
 
@@ -110,7 +113,7 @@ workspace/
 
 Beyond the CLI TUI, two additional frontends can be started at runtime:
 
-- **Discord** (`/discord`) — Requires `discord_token` in config.json.
+- **Discord** (`/discord`) — Requires `[frontend.discord]` token in `config.toml`.
 - **WebSocket** (`/gateway`) — JSON-RPC interface for programmatic access. Supports agent registration, binding management, and message dispatch.
 
 All frontends implement the `Channel` trait and can run concurrently.

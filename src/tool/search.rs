@@ -5,9 +5,9 @@ use tokio::fs;
 use tokio::process::Command;
 use tokio::time::Duration;
 
+use crate::config::tuning;
 use crate::engine::node::Node;
 use crate::engine::store::SharedStore;
-use crate::config::tuning;
 use crate::tool::push_tool_result;
 
 /// Resolve an optional path relative to workdir with traversal protection
@@ -15,9 +15,10 @@ fn resolve_safe_dir(raw: Option<&str>) -> Result<PathBuf> {
     let workdir = std::env::current_dir()?;
     match raw {
         Some(p) => {
-            let resolved = workdir.join(p).canonicalize().map_err(|e| {
-                anyhow::anyhow!("path not found: {p}: {e}")
-            })?;
+            let resolved = workdir
+                .join(p)
+                .canonicalize()
+                .map_err(|e| anyhow::anyhow!("path not found: {p}: {e}"))?;
             if !resolved.starts_with(&workdir) {
                 return Err(anyhow::anyhow!(
                     "Path traversal blocked: {p} resolves outside workdir"
@@ -56,19 +57,20 @@ impl Node for GlobFile {
     }
 
     async fn exec(&self, full_pattern: String) -> Result<String> {
-        let max_results = tuning().glob_max_results;
+        let max_results = tuning().limits.glob_max_results;
         let mut entries: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
-        for entry in glob::glob(&full_pattern)
+        for path in glob::glob(&full_pattern)
             .map_err(|e| anyhow::anyhow!("invalid glob pattern: {e}"))?
+            .flatten()
         {
-            if let Ok(path) = entry {
-                if let Ok(meta) = path.metadata() {
-                    if meta.file_type().is_file() {
-                        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
-                        entries.push((path, mtime));
-                    }
-                }
+            let Ok(meta) = path.metadata() else {
+                continue;
+            };
+            if !meta.file_type().is_file() {
+                continue;
             }
+            let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            entries.push((path, mtime));
         }
 
         entries.sort_by(|a, b| b.1.cmp(&a.1));
@@ -86,7 +88,9 @@ impl Node for GlobFile {
 
         let mut result = lines.join("\n");
         if total > max_results {
-            result.push_str(&format!("\n... and {} more", total - max_results));
+            result.push_str("\n... and ");
+            result.push_str(&(total - max_results).to_string());
+            result.push_str(" more");
         }
         Ok(result)
     }
@@ -119,12 +123,9 @@ impl Node for GrepFile {
         Ok((self.pattern.clone(), search_path, self.include.clone()))
     }
 
-    async fn exec(
-        &self,
-        prep_res: (String, PathBuf, Option<String>),
-    ) -> Result<String> {
+    async fn exec(&self, prep_res: (String, PathBuf, Option<String>)) -> Result<String> {
         let (pattern, search_path, include) = prep_res;
-        let max = tuning().grep_max_results;
+        let max = tuning().limits.grep_max_results;
 
         if has_rg() {
             return rg_search(&pattern, &search_path, include.as_deref(), max).await;
@@ -172,9 +173,17 @@ async fn rg_search(
         cmd.arg("--glob").arg(glob_pat);
     }
 
-    let output = tokio::time::timeout(Duration::from_secs(30), cmd.output())
-        .await
-        .map_err(|_| anyhow::anyhow!("grep timed out after 30s"))??;
+    let output = tokio::time::timeout(
+        Duration::from_secs(tuning().timeouts.search_timeout_secs),
+        cmd.output(),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "grep timed out after {}s",
+            tuning().timeouts.search_timeout_secs
+        )
+    })??;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let text = stdout.trim();
@@ -185,7 +194,9 @@ async fn rg_search(
     let lines: Vec<&str> = text.lines().collect();
     if lines.len() > max {
         let mut result: String = lines[..max].join("\n");
-        result.push_str(&format!("\n... (truncated at {max} matches)"));
+        result.push_str("\n... (truncated at ");
+        result.push_str(&max.to_string());
+        result.push_str(" matches)");
         Ok(result)
     } else {
         Ok(lines.join("\n"))
@@ -199,9 +210,7 @@ async fn regex_search(
     max: usize,
 ) -> Result<String> {
     let re = regex::Regex::new(pattern)?;
-    let include_glob = include.and_then(|g| {
-        glob::Pattern::new(&normalize_glob_pattern(g)).ok()
-    });
+    let include_glob = include.and_then(|g| glob::Pattern::new(&normalize_glob_pattern(g)).ok());
 
     let mut matches = Vec::new();
 
@@ -210,23 +219,22 @@ async fn regex_search(
     } else {
         let mut stack = vec![path.to_path_buf()];
         while let Some(dir) = stack.pop() {
-            let mut entries = match fs::read_dir(&dir).await {
-                Ok(e) => e,
-                Err(_) => continue,
+            let Ok(mut entries) = fs::read_dir(&dir).await else {
+                continue;
             };
             while let Ok(Some(entry)) = entries.next_entry().await {
-                let ft = match entry.file_type().await {
-                    Ok(ft) => ft,
-                    Err(_) => continue,
+                let Ok(ft) = entry.file_type().await else {
+                    continue;
                 };
                 if ft.is_dir() {
                     stack.push(entry.path());
                 } else if ft.is_file() {
                     let p = entry.path();
-                    if let Some(ref pat) = include_glob {
-                        if !pat.matches_path(&p) {
-                            continue;
-                        }
+                    if include_glob
+                        .as_ref()
+                        .is_some_and(|pat| !pat.matches_path(&p))
+                    {
+                        continue;
                     }
                     search_file(&re, &p, &mut matches, max).await;
                     if matches.len() >= max {
@@ -246,9 +254,8 @@ async fn regex_search(
 }
 
 async fn search_file(re: &regex::Regex, path: &Path, matches: &mut Vec<String>, max: usize) {
-    let content = match fs::read_to_string(path).await {
-        Ok(c) => c,
-        Err(_) => return,
+    let Ok(content) = fs::read_to_string(path).await else {
+        return;
     };
     for (i, line) in content.lines().enumerate() {
         if re.is_match(line) {

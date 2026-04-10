@@ -4,13 +4,11 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 pub use crate::config::LLMConfig;
-use crate::team::{
-    BackgroundManager, TaskManager, TeammateManager, TodoManager, WorktreeManager,
-};
 use crate::intelligence::Intelligence;
 use crate::intelligence::manager::SharedAgents;
 use crate::routing::protocol::ToolPolicy;
 use crate::scheduler::cron::CronHandle;
+use crate::team::{BackgroundManager, TaskManager, TeammateManager, TodoManager, WorktreeManager};
 
 /// LLM-visible conversation state
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,18 +67,19 @@ pub struct SystemState {
     pub worktrees: Option<WorktreeManager>,
     /// Per-session tool permission policy
     pub tool_policy: ToolPolicy,
-    /// Set by the `idle` tool to break out of cot_loop
+    /// Set by the `idle` tool to break out of `cot_loop`
     pub idle_requested: bool,
     /// Whether agent is in plan-only mode (no execution, only research/planning)
     pub plan_mode: bool,
     /// Cron service handle for managing scheduled jobs
     pub cron: Option<CronHandle>,
-    /// Tracks files read by read_file: canonical path → mtime at read time
+    /// Tracks files read by `read_file`: canonical path → mtime at read time
     pub read_file_state: HashMap<String, SystemTime>,
 }
 
 impl SystemState {
     /// This agent's team identity ("lead" if unnamed)
+    #[must_use]
     pub fn sender_name(&self) -> &str {
         self.team_name.as_deref().unwrap_or("lead")
     }
@@ -98,6 +97,7 @@ pub struct SharedStore {
 #[cfg(test)]
 impl SharedStore {
     /// Empty store with default config for unit tests
+    #[must_use]
     pub fn test_default() -> Self {
         Self {
             context: Context {

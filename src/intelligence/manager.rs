@@ -1,16 +1,16 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::{Arc, LazyLock, RwLock};
 
 use regex::Regex;
 
 use crate::config::tuning;
-use crate::intelligence::utils::{discover_subdirs, extract_body, parse_frontmatter};
+use crate::intelligence::utils::{DiscoveredFile, discover_subdirs, extract_body};
 
 static VALID_ID_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-z0-9][a-z0-9_-]{0,63}$").unwrap());
-static INVALID_CHARS_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[^a-z0-9_-]+").unwrap());
+static INVALID_CHARS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^a-z0-9_-]+").unwrap());
 
 /// Normalize a raw string into a valid agent ID
 ///
@@ -27,7 +27,7 @@ static INVALID_CHARS_RE: LazyLock<Regex> =
 pub fn normalize_agent_id(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return tuning().default_agent_id.clone();
+        return tuning().routing.default_agent_id.clone();
     }
     if VALID_ID_RE.is_match(trimmed) {
         return trimmed.to_lowercase();
@@ -36,9 +36,48 @@ pub fn normalize_agent_id(value: &str) -> String {
     let cleaned = INVALID_CHARS_RE.replace_all(&lower, "-");
     let cleaned = cleaned.trim_matches('-');
     if cleaned.is_empty() {
-        return tuning().default_agent_id.clone();
+        return tuning().routing.default_agent_id.clone();
     }
     cleaned[..cleaned.len().min(64)].to_string()
+}
+
+/// Per-agent configuration
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DmScope {
+    Main,
+    #[default]
+    PerPeer,
+    PerChannelPeer,
+    PerAccountChannelPeer,
+}
+
+impl DmScope {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::PerPeer => "per-peer",
+            Self::PerChannelPeer => "per-channel-peer",
+            Self::PerAccountChannelPeer => "per-account-channel-peer",
+        }
+    }
+}
+
+impl FromStr for DmScope {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "main" => Ok(Self::Main),
+            "per-peer" => Ok(Self::PerPeer),
+            "per-channel-peer" => Ok(Self::PerChannelPeer),
+            "per-account-channel-peer" => Ok(Self::PerAccountChannelPeer),
+            _ => Err(format!(
+                "invalid dm_scope '{value}', expected one of: main, per-peer, per-channel-peer, per-account-channel-peer"
+            )),
+        }
+    }
 }
 
 /// Per-agent configuration
@@ -50,15 +89,13 @@ pub struct AgentConfig {
     pub system_prompt: String,
     /// Model override; empty means use global default
     pub model: String,
-    /// Session isolation scope: "main", "per-peer", "per-channel-peer",
-    /// "per-account-channel-peer"
-    pub dm_scope: String,
+    /// Session isolation scope.
+    pub dm_scope: DmScope,
     /// Per-agent workspace directory; overrides global `WORKSPACE_DIR`
     pub workspace_dir: String,
     /// Tools this agent is not allowed to use (parsed from AGENT.md frontmatter)
     pub denied_tools: Vec<String>,
 }
-
 
 /// Registry of agent configurations
 pub struct AgentManager {
@@ -73,6 +110,7 @@ impl AgentManager {
     /// # Arguments
     ///
     /// * `default_model` - Global default model used when an agent has no override
+    #[must_use]
     pub fn new(default_model: String) -> Self {
         Self {
             agents: HashMap::new(),
@@ -99,11 +137,13 @@ impl AgentManager {
     /// # Returns
     ///
     /// `None` if no agent is registered with the given ID.
+    #[must_use]
     pub fn get(&self, agent_id: &str) -> Option<&AgentConfig> {
         self.agents.get(&normalize_agent_id(agent_id))
     }
 
     /// List all registered agents
+    #[must_use]
     pub fn list(&self) -> Vec<&AgentConfig> {
         self.agents.values().collect()
     }
@@ -117,11 +157,11 @@ impl AgentManager {
     /// # Returns
     ///
     /// Per-agent model if set, otherwise the global default.
+    #[must_use]
     pub fn effective_model(&self, agent_id: &str) -> String {
         self.get(agent_id)
             .filter(|a| !a.model.is_empty())
-            .map(|a| a.model.clone())
-            .unwrap_or_else(|| self.default_model.clone())
+            .map_or_else(|| self.default_model.clone(), |agent| agent.model.clone())
     }
 
     /// Discover agents from workspace subdirectories
@@ -130,37 +170,28 @@ impl AgentManager {
     /// Directory name becomes both the agent ID and name.
     /// The entire file content is used as the system prompt (identity).
     pub fn discover_workspace(&mut self, base_dir: &Path) {
-        for f in discover_subdirs(base_dir, "AGENT.md") {
-            let meta = parse_frontmatter(&f.content);
-            let identity = extract_body(&f.content);
-            let identity = if identity.is_empty() {
-                f.content.trim().to_string()
-            } else {
-                identity
-            };
-            let workspace_dir = f.path
-                .parent()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let denied_tools = meta
-                .get("denied_tools")
-                .map(|v| {
-                    v.split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default();
+        for file in discover_subdirs(base_dir, "AGENT.md") {
+            self.register(Self::build_discovered_agent(file));
+        }
+    }
 
-            self.register(AgentConfig {
-                id: f.name.clone(),
-                name: f.name,
-                system_prompt: identity,
-                model: String::new(),
-                dm_scope: "per-peer".into(),
-                workspace_dir,
-                denied_tools,
-            });
+    fn build_discovered_agent(file: DiscoveredFile) -> AgentConfig {
+        let system_prompt = extract_identity(&file.content);
+        let workspace_dir = file
+            .path
+            .parent()
+            .map_or_else(String::new, |path| path.to_string_lossy().to_string());
+        let denied_tools = denied_tools_from_meta(&file.meta);
+        let dm_scope = discovered_dm_scope(&file.meta);
+
+        AgentConfig {
+            id: file.name.clone(),
+            name: file.name,
+            system_prompt,
+            model: String::new(),
+            dm_scope,
+            workspace_dir,
+            denied_tools,
         }
     }
 }
@@ -179,21 +210,25 @@ impl SharedAgents {
     }
 
     /// Create an empty registry (for tests and standalone contexts)
+    #[must_use]
     pub fn empty() -> Self {
         Self(Arc::new(RwLock::new(AgentManager::new(String::new()))))
     }
 
     /// Look up an agent by ID
+    #[must_use]
     pub fn get(&self, agent_id: &str) -> Option<AgentConfig> {
         self.read().get(agent_id).cloned()
     }
 
     /// List all registered agents
+    #[must_use]
     pub fn list(&self) -> Vec<AgentConfig> {
         self.read().list().into_iter().cloned().collect()
     }
 
     /// Resolve the effective model for an agent
+    #[must_use]
     pub fn effective_model(&self, agent_id: &str) -> String {
         self.read().effective_model(agent_id)
     }
@@ -203,6 +238,40 @@ impl SharedAgents {
             log::error!("AgentManager lock poisoned, recovering: {e}");
             e.into_inner()
         })
+    }
+}
+
+fn extract_identity(content: &str) -> String {
+    let identity = extract_body(content);
+    if identity.is_empty() {
+        content.trim().to_string()
+    } else {
+        identity
+    }
+}
+
+fn denied_tools_from_meta(meta: &HashMap<String, String>) -> Vec<String> {
+    meta.get("denied_tools").map_or_else(Vec::new, |value| {
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|tool| !tool.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()
+    })
+}
+
+fn discovered_dm_scope(meta: &HashMap<String, String>) -> DmScope {
+    let Some(value) = meta.get("dm_scope") else {
+        return DmScope::default();
+    };
+
+    match value.parse::<DmScope>() {
+        Ok(scope) => scope,
+        Err(error) => {
+            log::warn!("Invalid AGENT.md dm_scope '{value}': {error}");
+            DmScope::default()
+        }
     }
 }
 
@@ -241,14 +310,11 @@ mod tests {
             name: "Luna".into(),
             system_prompt: "You are Luna, warm and curious.".into(),
             model: String::new(),
-            dm_scope: "per-peer".into(),
+            dm_scope: DmScope::PerPeer,
             workspace_dir: String::new(),
             denied_tools: Vec::new(),
         };
-        assert_eq!(
-            config.system_prompt,
-            "You are Luna, warm and curious."
-        );
+        assert_eq!(config.system_prompt, "You are Luna, warm and curious.");
     }
 
     #[test]
@@ -259,7 +325,7 @@ mod tests {
             name: "Luna".into(),
             system_prompt: String::new(),
             model: String::new(),
-            dm_scope: "per-peer".into(),
+            dm_scope: DmScope::PerPeer,
             workspace_dir: String::new(),
             denied_tools: Vec::new(),
         });
@@ -276,7 +342,7 @@ mod tests {
             name: "A".into(),
             system_prompt: String::new(),
             model: "custom-model".into(),
-            dm_scope: "per-peer".into(),
+            dm_scope: DmScope::PerPeer,
             workspace_dir: String::new(),
             denied_tools: Vec::new(),
         });
@@ -285,11 +351,21 @@ mod tests {
             name: "B".into(),
             system_prompt: String::new(),
             model: String::new(),
-            dm_scope: "per-peer".into(),
+            dm_scope: DmScope::PerPeer,
             workspace_dir: String::new(),
             denied_tools: Vec::new(),
         });
         assert_eq!(mgr.effective_model("a"), "custom-model");
         assert_eq!(mgr.effective_model("b"), "global-model");
+    }
+
+    #[test]
+    fn test_dm_scope_roundtrip() {
+        assert_eq!("per-peer".parse::<DmScope>().unwrap(), DmScope::PerPeer);
+        assert_eq!(
+            DmScope::PerAccountChannelPeer.as_str(),
+            "per-account-channel-peer"
+        );
+        assert!("invalid".parse::<DmScope>().is_err());
     }
 }

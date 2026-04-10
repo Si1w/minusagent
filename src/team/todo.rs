@@ -1,8 +1,10 @@
+use std::fmt::Write as _;
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::engine::node::Node;
-use crate::engine::store::SharedStore;
+use crate::engine::store::{Message, Role, SharedStore};
 use crate::tool::push_tool_result;
 
 /// Status of a todo item
@@ -33,6 +35,7 @@ pub struct TodoManager {
 
 impl TodoManager {
     /// Create an empty manager
+    #[must_use]
     pub fn new() -> Self {
         Self {
             items: Vec::new(),
@@ -41,21 +44,64 @@ impl TodoManager {
     }
 
     /// Render the current todo list as a formatted string
+    #[must_use]
     pub fn render(&self) -> String {
         if self.items.is_empty() {
             return "No todos.".into();
         }
         let mut out = String::from("Todos:\n");
         for item in &self.items {
-            let marker = match item.status {
-                TodoStatus::Pending => "[ ]",
-                TodoStatus::InProgress => "[>]",
-                TodoStatus::Completed => "[x]",
-            };
-            out.push_str(&format!("  {} #{} {}\n", marker, item.id, item.text));
+            let _ = writeln!(
+                out,
+                "  {} #{} {}",
+                todo_marker(&item.status),
+                item.id,
+                item.text,
+            );
         }
         out
     }
+
+    /// Record whether the current round updated the todo list.
+    pub fn record_round(&mut self, had_update: bool) {
+        if had_update {
+            self.rounds_since_update = 0;
+        } else {
+            self.rounds_since_update += 1;
+        }
+    }
+
+    /// Whether the agent should be reminded to update todos.
+    #[must_use]
+    pub fn should_nag(&self, threshold: usize) -> bool {
+        self.rounds_since_update >= threshold && !self.items.is_empty()
+    }
+}
+
+impl Default for TodoManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn todo_marker(status: &TodoStatus) -> &'static str {
+    match status {
+        TodoStatus::Pending => "[ ]",
+        TodoStatus::InProgress => "[>]",
+        TodoStatus::Completed => "[x]",
+    }
+}
+
+/// Append a reminder to the most recent tool message.
+pub fn append_reminder(history: &mut [Message], reminder: &str) -> bool {
+    if let Some(last) = history.last_mut()
+        && last.role == Role::Tool
+        && let Some(content) = &mut last.content
+    {
+        content.push_str(reminder);
+        return true;
+    }
+    false
 }
 
 /// Node that validates and writes todo items to the store
@@ -197,8 +243,6 @@ mod tests {
 
     #[test]
     fn test_nag_reminder_triggers_after_3_rounds() {
-        use crate::engine::store::{Message, Role};
-
         let mut store = SharedStore::test_default();
         // Populate todo items so nag can trigger
         store.state.todo.items = vec![TodoItem {
@@ -218,33 +262,24 @@ mod tests {
             tool_call_id: Some("c1".into()),
         });
 
-        // Simulate the nag logic from agent.rs
-        if store.state.todo.rounds_since_update >= 3
-            && !store.state.todo.items.is_empty()
-        {
-            if let Some(last) = store.context.history.last_mut() {
-                if last.role == Role::Tool {
-                    if let Some(content) = &mut last.content {
-                        content.push_str(
-                            "\n\n<reminder>Update your todos.</reminder>",
-                        );
-                    }
-                }
-            }
+        if store.state.todo.should_nag(3) {
+            assert!(append_reminder(
+                &mut store.context.history,
+                "\n\n<reminder>Update your todos.</reminder>",
+            ));
         }
 
         let last = store.context.history.last().unwrap();
-        assert!(last
-            .content
-            .as_ref()
-            .unwrap()
-            .contains("<reminder>Update your todos.</reminder>"));
+        assert!(
+            last.content
+                .as_ref()
+                .unwrap()
+                .contains("<reminder>Update your todos.</reminder>")
+        );
     }
 
     #[test]
     fn test_nag_reminder_skipped_when_no_items() {
-        use crate::engine::store::{Message, Role};
-
         let mut store = SharedStore::test_default();
         // No todo items
         store.state.todo.rounds_since_update = 5;
@@ -257,8 +292,8 @@ mod tests {
         });
 
         // Nag should NOT trigger when items is empty
-        let should_nag = store.state.todo.rounds_since_update >= 3
-            && !store.state.todo.items.is_empty();
+        let should_nag =
+            store.state.todo.rounds_since_update >= 3 && !store.state.todo.items.is_empty();
         assert!(!should_nag);
     }
 }

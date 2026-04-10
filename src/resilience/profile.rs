@@ -13,6 +13,7 @@ pub struct AuthProfile {
 
 impl AuthProfile {
     /// Create a profile from an API key
+    #[must_use]
     pub fn new(api_key: String, base_url: Option<String>) -> Self {
         Self {
             api_key,
@@ -24,6 +25,7 @@ impl AuthProfile {
     }
 
     /// Whether this profile is available (not in cooldown)
+    #[must_use]
     pub fn is_available(&self) -> bool {
         match self.cooldown_until {
             Some(until) => Instant::now() >= until,
@@ -38,16 +40,19 @@ pub struct ProfileManager {
 }
 
 impl ProfileManager {
+    #[must_use]
     pub fn new(profiles: Vec<AuthProfile>) -> Self {
         Self { profiles }
     }
 
     /// Select the first non-cooldown profile
+    #[must_use]
     pub fn select(&self) -> Option<usize> {
-        self.profiles.iter().position(|p| p.is_available())
+        self.profiles.iter().position(AuthProfile::is_available)
     }
 
     /// Get profile by index
+    #[must_use]
     pub fn get(&self, idx: usize) -> Option<&AuthProfile> {
         self.profiles.get(idx)
     }
@@ -70,18 +75,30 @@ impl ProfileManager {
     }
 
     /// Number of registered profiles
+    #[must_use]
     pub fn len(&self) -> usize {
         self.profiles.len()
     }
 
+    /// Whether there are no registered profiles.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.profiles.is_empty()
+    }
+
     /// Profile status summary for display
+    #[must_use]
     pub fn status_lines(&self) -> Vec<String> {
         self.profiles
             .iter()
             .enumerate()
             .map(|(i, p)| {
                 let key_preview = if p.api_key.len() > 8 {
-                    format!("{}...{}", &p.api_key[..4], &p.api_key[p.api_key.len() - 4..])
+                    format!(
+                        "{}...{}",
+                        &p.api_key[..4],
+                        &p.api_key[p.api_key.len() - 4..]
+                    )
                 } else {
                     "****".to_string()
                 };
@@ -90,8 +107,7 @@ impl ProfileManager {
                 } else if let Some(reason) = &p.failure_reason {
                     let remaining = p
                         .cooldown_until
-                        .map(|u| u.saturating_duration_since(Instant::now()).as_secs())
-                        .unwrap_or(0);
+                        .map_or(0, |u| u.saturating_duration_since(Instant::now()).as_secs());
                     format!("cooldown ({reason}, {remaining}s)")
                 } else {
                     "cooldown".to_string()
@@ -122,28 +138,22 @@ mod tests {
             AuthProfile::new("key-a".into(), None),
             AuthProfile::new("key-b".into(), None),
         ];
-        profiles[0].cooldown_until =
-            Some(Instant::now() + std::time::Duration::from_secs(300));
+        profiles[0].cooldown_until = Some(Instant::now() + std::time::Duration::from_secs(300));
         let mgr = ProfileManager::new(profiles);
         assert_eq!(mgr.select(), Some(1));
     }
 
     #[test]
     fn test_all_in_cooldown_returns_none() {
-        let mut profiles = vec![
-            AuthProfile::new("key-a".into(), None),
-        ];
-        profiles[0].cooldown_until =
-            Some(Instant::now() + std::time::Duration::from_secs(300));
+        let mut profiles = vec![AuthProfile::new("key-a".into(), None)];
+        profiles[0].cooldown_until = Some(Instant::now() + std::time::Duration::from_secs(300));
         let mgr = ProfileManager::new(profiles);
         assert_eq!(mgr.select(), None);
     }
 
     #[test]
     fn test_mark_success_clears_cooldown() {
-        let mut mgr = ProfileManager::new(vec![
-            AuthProfile::new("key-a".into(), None),
-        ]);
+        let mut mgr = ProfileManager::new(vec![AuthProfile::new("key-a".into(), None)]);
         mgr.mark_failure(0, FailoverReason::RateLimit, 120);
         assert!(!mgr.profiles[0].is_available());
 

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 
 use chrono::Utc;
 
@@ -34,6 +35,7 @@ fn section(heading: &str, content: &str) -> Option<String> {
 ///
 /// Each entry shows name, TLDR, and file path so the LLM can
 /// use `read_file` to progressively load full content when relevant.
+#[must_use]
 pub fn format_memory_content(entries: &[MemoryEntry]) -> String {
     if entries.is_empty() {
         return String::new();
@@ -41,14 +43,7 @@ pub fn format_memory_content(entries: &[MemoryEntry]) -> String {
 
     entries
         .iter()
-        .map(|e| {
-            format!(
-                "- `{}`: {} (path: `{}`)",
-                e.name,
-                e.tldr,
-                e.path.display(),
-            )
-        })
+        .map(|e| format!("- `{}`: {} (path: `{}`)", e.name, e.tldr, e.path.display(),))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -56,6 +51,7 @@ pub fn format_memory_content(entries: &[MemoryEntry]) -> String {
 /// Format discovered skills as a summary list (name + description only)
 ///
 /// Full skill body is loaded on activation, not at prompt assembly time.
+#[must_use]
 pub fn format_skills_content(skills: &[Skill]) -> String {
     if skills.is_empty() {
         return String::new();
@@ -77,13 +73,17 @@ pub fn format_skills_content(skills: &[Skill]) -> String {
 /// 3. Skills (name + description summary)
 /// 5. Bootstrap context (HEARTBEAT.md, BOOTSTRAP.md, AGENTS.md, USER.md)
 /// 7. Channel hints
-pub fn build_static_prefix(
+#[must_use]
+pub fn build_static_prefix<S>(
     mode: PromptMode,
     identity: &str,
-    bootstrap: &HashMap<String, String>,
+    bootstrap: &HashMap<String, String, S>,
     skills: &[Skill],
     channel: &str,
-) -> String {
+) -> String
+where
+    S: BuildHasher,
+{
     let is_full = mode == PromptMode::Full;
     let mut sections: Vec<String> = Vec::new();
 
@@ -95,7 +95,7 @@ pub fn build_static_prefix(
     // Layer 2: Tool usage guidelines
     sections.extend(section(
         "Tool Usage Guidelines",
-        bootstrap.get("TOOLS.md").map(|s| s.as_str()).unwrap_or(""),
+        bootstrap_content(bootstrap, "TOOLS.md"),
     ));
 
     // Layer 3: Skills
@@ -108,10 +108,7 @@ pub fn build_static_prefix(
     if is_full || mode == PromptMode::Minimal {
         for name in ["HEARTBEAT.md", "BOOTSTRAP.md", "AGENTS.md", "USER.md"] {
             let title = name.trim_end_matches(".md");
-            sections.extend(section(
-                title,
-                bootstrap.get(name).map(|s| s.as_str()).unwrap_or(""),
-            ));
+            sections.extend(section(title, bootstrap_content(bootstrap, name)));
         }
     }
 
@@ -127,6 +124,7 @@ pub fn build_static_prefix(
 ///
 /// 4. Memory (TLDR index — hot-updated via /remember)
 /// 6. Runtime context (timestamp changes each turn)
+#[must_use]
 pub fn build_dynamic_suffix(
     mode: PromptMode,
     memories: &[MemoryEntry],
@@ -159,26 +157,55 @@ pub fn build_dynamic_suffix(
     sections.join("\n\n")
 }
 
+fn bootstrap_content<'a, S>(bootstrap: &'a HashMap<String, String, S>, name: &str) -> &'a str
+where
+    S: BuildHasher,
+{
+    bootstrap.get(name).map_or("", String::as_str)
+}
+
 /// Build the full system prompt by joining static prefix and dynamic suffix
 ///
 /// Convenience function that assembles all 7 layers with a boundary marker.
 #[cfg(test)]
-fn build_system_prompt(
-    mode: PromptMode,
-    identity: &str,
-    bootstrap: &HashMap<String, String>,
-    skills: &[Skill],
-    memories: &[MemoryEntry],
-    agent_id: &str,
-    model: &str,
-    channel: &str,
-) -> String {
-    let static_part = build_static_prefix(mode, identity, bootstrap, skills, channel);
-    let dynamic_part = build_dynamic_suffix(mode, memories, agent_id, model, channel);
+#[derive(Clone, Copy)]
+struct PromptBuildContext<'a, S>
+where
+    S: BuildHasher,
+{
+    identity: &'a str,
+    bootstrap: &'a HashMap<String, String, S>,
+    skills: &'a [Skill],
+    memories: &'a [MemoryEntry],
+    agent_id: &'a str,
+    model: &'a str,
+    channel: &'a str,
+}
+
+#[cfg(test)]
+fn build_system_prompt<S>(mode: PromptMode, context: &PromptBuildContext<'_, S>) -> String
+where
+    S: BuildHasher,
+{
+    let static_part = build_static_prefix(
+        mode,
+        context.identity,
+        context.bootstrap,
+        context.skills,
+        context.channel,
+    );
+    let dynamic_part = build_dynamic_suffix(
+        mode,
+        context.memories,
+        context.agent_id,
+        context.model,
+        context.channel,
+    );
     join_prompt(&static_part, &dynamic_part)
 }
 
 /// Join static prefix and dynamic suffix with boundary marker
+#[must_use]
 pub fn join_prompt(static_prefix: &str, dynamic_suffix: &str) -> String {
     if dynamic_suffix.is_empty() {
         return static_prefix.to_string();
@@ -188,13 +215,9 @@ pub fn join_prompt(static_prefix: &str, dynamic_suffix: &str) -> String {
 
 fn channel_hint(channel: &str) -> &str {
     match channel {
-        "cli" | "terminal" => {
-            "You are responding via a terminal REPL. Markdown is supported."
-        }
+        "cli" | "terminal" => "You are responding via a terminal REPL. Markdown is supported.",
         "telegram" => "You are responding via Telegram. Keep messages concise.",
-        "discord" => {
-            "You are responding via Discord. Keep messages under 2000 characters."
-        }
+        "discord" => "You are responding via Discord. Keep messages under 2000 characters.",
         "slack" => "You are responding via Slack. Use Slack mrkdwn formatting.",
         _ => "You are responding via an API channel.",
     }
@@ -207,8 +230,16 @@ mod tests {
     #[test]
     fn test_identity_in_prompt() {
         let prompt = build_system_prompt(
-            PromptMode::Full, "You are Luna.", &HashMap::new(),
-            &[], &[], "luna", "gpt-4", "cli",
+            PromptMode::Full,
+            &PromptBuildContext {
+                identity: "You are Luna.",
+                bootstrap: &HashMap::new(),
+                skills: &[],
+                memories: &[],
+                agent_id: "luna",
+                model: "gpt-4",
+                channel: "cli",
+            },
         );
         assert!(prompt.starts_with("You are Luna."));
         assert!(prompt.contains("Agent ID: luna"));
@@ -217,8 +248,16 @@ mod tests {
     #[test]
     fn test_empty_identity() {
         let prompt = build_system_prompt(
-            PromptMode::Full, "", &HashMap::new(),
-            &[], &[], "main", "gpt-4", "cli",
+            PromptMode::Full,
+            &PromptBuildContext {
+                identity: "",
+                bootstrap: &HashMap::new(),
+                skills: &[],
+                memories: &[],
+                agent_id: "main",
+                model: "gpt-4",
+                channel: "cli",
+            },
         );
         // Should not start with an empty section
         assert!(!prompt.starts_with('\n'));
@@ -238,8 +277,16 @@ mod tests {
             path: "/memory/fact.md".into(),
         }];
         let prompt = build_system_prompt(
-            PromptMode::Minimal, "Identity.", &HashMap::new(),
-            &skills, &memories, "main", "gpt-4", "cli",
+            PromptMode::Minimal,
+            &PromptBuildContext {
+                identity: "Identity.",
+                bootstrap: &HashMap::new(),
+                skills: &skills,
+                memories: &memories,
+                agent_id: "main",
+                model: "gpt-4",
+                channel: "cli",
+            },
         );
         assert!(!prompt.contains("Available Skills"));
         assert!(!prompt.contains("Memory"));
@@ -253,8 +300,16 @@ mod tests {
             path: "/workspace/memory/dark_mode.md".into(),
         }];
         let prompt = build_system_prompt(
-            PromptMode::Full, "Identity.", &HashMap::new(),
-            &[], &memories, "main", "gpt-4", "cli",
+            PromptMode::Full,
+            &PromptBuildContext {
+                identity: "Identity.",
+                bootstrap: &HashMap::new(),
+                skills: &[],
+                memories: &memories,
+                agent_id: "main",
+                model: "gpt-4",
+                channel: "cli",
+            },
         );
         assert!(prompt.contains("# Memory"));
         assert!(prompt.contains("`dark_mode`"));
@@ -269,8 +324,16 @@ mod tests {
             path: "/skills/greet/SKILL.md".into(),
         }];
         let prompt = build_system_prompt(
-            PromptMode::Full, "Identity.", &HashMap::new(),
-            &skills, &[], "main", "gpt-4", "cli",
+            PromptMode::Full,
+            &PromptBuildContext {
+                identity: "Identity.",
+                bootstrap: &HashMap::new(),
+                skills: &skills,
+                memories: &[],
+                agent_id: "main",
+                model: "gpt-4",
+                channel: "cli",
+            },
         );
         assert!(prompt.contains("# Available Skills"));
         assert!(prompt.contains("`greet`: Say hello"));
@@ -281,19 +344,16 @@ mod tests {
     #[test]
     fn test_section_helper() {
         assert!(section("Title", "").is_none());
-        assert_eq!(
-            section("Title", "content").unwrap(),
-            "# Title\n\ncontent"
-        );
+        assert_eq!(section("Title", "content").unwrap(), "# Title\n\ncontent");
     }
 
     #[test]
     fn test_section_strips_duplicate_heading() {
-        let result = section("Tool Usage Guidelines", "# Tool Usage Guidelines\n\nBody text.");
-        assert_eq!(
-            result.unwrap(),
-            "# Tool Usage Guidelines\n\nBody text."
+        let result = section(
+            "Tool Usage Guidelines",
+            "# Tool Usage Guidelines\n\nBody text.",
         );
+        assert_eq!(result.unwrap(), "# Tool Usage Guidelines\n\nBody text.");
     }
 
     #[test]
@@ -308,8 +368,16 @@ mod tests {
     #[test]
     fn test_boundary_present_with_dynamic_content() {
         let prompt = build_system_prompt(
-            PromptMode::Full, "Identity.", &HashMap::new(),
-            &[], &[], "main", "gpt-4", "cli",
+            PromptMode::Full,
+            &PromptBuildContext {
+                identity: "Identity.",
+                bootstrap: &HashMap::new(),
+                skills: &[],
+                memories: &[],
+                agent_id: "main",
+                model: "gpt-4",
+                channel: "cli",
+            },
         );
         assert!(
             prompt.contains(DYNAMIC_BOUNDARY),
@@ -319,12 +387,8 @@ mod tests {
 
     #[test]
     fn test_static_prefix_stable_across_calls() {
-        let a = build_static_prefix(
-            PromptMode::Full, "Identity.", &HashMap::new(), &[], "cli",
-        );
-        let b = build_static_prefix(
-            PromptMode::Full, "Identity.", &HashMap::new(), &[], "cli",
-        );
+        let a = build_static_prefix(PromptMode::Full, "Identity.", &HashMap::new(), &[], "cli");
+        let b = build_static_prefix(PromptMode::Full, "Identity.", &HashMap::new(), &[], "cli");
         assert_eq!(a, b, "static prefix should be identical across calls");
     }
 
@@ -335,12 +399,10 @@ mod tests {
             tldr: "A fact".into(),
             path: "/memory/fact.md".into(),
         }];
-        let static_part = build_static_prefix(
-            PromptMode::Full, "Identity.", &HashMap::new(), &[], "cli",
-        );
-        let dynamic_part = build_dynamic_suffix(
-            PromptMode::Full, &memories, "main", "gpt-4", "cli",
-        );
+        let static_part =
+            build_static_prefix(PromptMode::Full, "Identity.", &HashMap::new(), &[], "cli");
+        let dynamic_part =
+            build_dynamic_suffix(PromptMode::Full, &memories, "main", "gpt-4", "cli");
         assert!(!static_part.contains("Memory"));
         assert!(!static_part.contains("Runtime Context"));
         assert!(dynamic_part.contains("Memory"));

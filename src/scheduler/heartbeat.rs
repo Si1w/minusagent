@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use chrono::{Local, Timelike, Utc};
 use tokio::sync::{mpsc, oneshot};
@@ -11,9 +12,9 @@ use crate::intelligence::memory::MemoryStore;
 use crate::intelligence::prompt::format_memory_content;
 use crate::intelligence::utils::{extract_body, parse_frontmatter};
 use crate::routing::delivery::DeliveryHandle;
-use crate::scheduler::{LANE_SESSION, LaneLock, now_secs, run_single_turn};
+use crate::scheduler::{LANE_SESSION, LaneLock, run_single_turn};
 
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
+type ActiveHours = (u8, u8);
 
 /// Parse heartbeat-specific overrides from HEARTBEAT.md frontmatter
 ///
@@ -22,28 +23,69 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// - `active_hours`: comma-separated start,end (e.g. `8, 23`)
 ///
 /// Returns `(interval, active_hours)` using tuning defaults for missing keys.
-fn parse_heartbeat_config(meta: &HashMap<String, String>) -> (Duration, (u8, u8)) {
+fn parse_heartbeat_config(meta: &HashMap<String, String>) -> (Duration, ActiveHours) {
+    let defaults = default_heartbeat_config();
     let interval = meta
         .get("interval")
         .and_then(|v| v.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(tuning().heartbeat_interval_secs));
+        .map_or(defaults.0, Duration::from_secs);
 
     let active_hours = meta
         .get("active_hours")
-        .and_then(|v| {
-            let parts: Vec<&str> = v.split(',').collect();
-            if parts.len() == 2 {
-                let s = parts[0].trim().parse::<u8>().ok()?;
-                let e = parts[1].trim().parse::<u8>().ok()?;
-                Some((s, e))
-            } else {
-                None
-            }
-        })
-        .unwrap_or(tuning().heartbeat_active_hours);
+        .and_then(|value| parse_active_hours(value))
+        .unwrap_or(defaults.1);
 
     (interval, active_hours)
+}
+
+fn default_heartbeat_config() -> (Duration, ActiveHours) {
+    (
+        Duration::from_secs(tuning().scheduler.heartbeat_interval_secs),
+        tuning().scheduler.heartbeat_active_hours,
+    )
+}
+
+fn parse_active_hours(value: &str) -> Option<ActiveHours> {
+    let (start, end) = value.split_once(',')?;
+    Some((
+        start.trim().parse::<u8>().ok()?,
+        end.trim().parse::<u8>().ok()?,
+    ))
+}
+
+fn is_within_active_hours(hour: u32, active_hours: ActiveHours) -> bool {
+    let (start, end) = active_hours;
+    let start = u32::from(start);
+    let end = u32::from(end);
+    if start <= end {
+        start <= hour && hour < end
+    } else {
+        !(end <= hour && hour < start)
+    }
+}
+
+fn format_last_run(last_run_at: Option<SystemTime>) -> String {
+    last_run_at.map_or_else(
+        || "never".to_string(),
+        |last_run| {
+            let timestamp: chrono::DateTime<Local> = chrono::DateTime::from(last_run);
+            timestamp.format("%Y-%m-%d %H:%M:%S").to_string()
+        },
+    )
+}
+
+fn heartbeat_message(output: &str) -> String {
+    let mut message = String::from("[heartbeat] ");
+    message.push_str(output);
+    message
+}
+
+fn load_heartbeat_config(path: &Path) -> (Duration, ActiveHours) {
+    std::fs::read_to_string(path)
+        .ok()
+        .map_or_else(default_heartbeat_config, |raw| {
+            parse_heartbeat_config(&parse_frontmatter(&raw))
+        })
 }
 
 /// Heartbeat runner status snapshot
@@ -111,21 +153,34 @@ struct HeartbeatRunner {
     delivery_to: String,
     interval: Duration,
     active_hours: (u8, u8),
-    last_run_at: f64,
+    last_run_at: Option<SystemTime>,
     running: bool,
     last_output: String,
     output_count: usize,
     /// Cached raw content from the last successful read of HEARTBEAT.md
     cached_content: Option<String>,
+    /// Mtime of the file when `cached_content` was loaded; skip re-read if unchanged
+    cached_mtime: Option<SystemTime>,
+    /// Cached body extracted from `cached_content`
+    cached_body: Option<String>,
 }
 
 impl HeartbeatRunner {
-    /// Read HEARTBEAT.md once, update config and cache content.
-    /// Returns the body text, or None if unreadable/empty.
+    /// Read HEARTBEAT.md if it changed on disk, update config and cache content.
+    /// Returns the body text, or `None` if unreadable/empty.
     fn refresh_file(&mut self) -> Option<String> {
-        let raw = match std::fs::read_to_string(&self.heartbeat_path) {
-            Ok(c) => c,
-            Err(_) => return None,
+        let mtime = std::fs::metadata(&self.heartbeat_path)
+            .ok()
+            .and_then(|meta| meta.modified().ok());
+        if mtime.is_some() && mtime == self.cached_mtime {
+            return self.cached_body.clone();
+        }
+
+        let Ok(raw) = std::fs::read_to_string(&self.heartbeat_path) else {
+            self.cached_content = None;
+            self.cached_body = None;
+            self.cached_mtime = None;
+            return None;
         };
         let meta = parse_frontmatter(&raw);
         let (interval, active_hours) = parse_heartbeat_config(&meta);
@@ -134,45 +189,38 @@ impl HeartbeatRunner {
         let body = extract_body(&raw);
         if body.trim().is_empty() {
             self.cached_content = None;
+            self.cached_body = None;
+            self.cached_mtime = mtime;
             return None;
         }
         self.cached_content = Some(raw);
+        self.cached_body = Some(body.clone());
+        self.cached_mtime = mtime;
         Some(body)
     }
 
-    /// Check 4 preconditions for running. Lock check is separate in execute().
+    /// Check 4 preconditions for running. Lock check is separate in `execute()`.
     fn should_run(&mut self) -> (bool, String) {
         if !self.heartbeat_path.exists() {
             return (false, "HEARTBEAT.md not found".into());
         }
-        let body = match self.refresh_file() {
-            Some(b) => b,
-            None => return (false, "HEARTBEAT.md body is empty".into()),
+        let Some(_body) = self.refresh_file() else {
+            return (false, "HEARTBEAT.md body is empty".into());
         };
-        let _ = body;
 
-        let now = now_secs();
-        let elapsed = now - self.last_run_at;
-        if elapsed < self.interval.as_secs_f64() {
-            let remaining = self.interval.as_secs_f64() - elapsed;
+        if let Some(elapsed) = self.elapsed_since_last_run()
+            && elapsed < self.interval
+        {
+            let remaining = self.interval.saturating_sub(elapsed).as_secs_f64();
             return (
                 false,
                 format!("interval not elapsed ({remaining:.0}s remaining)"),
             );
         }
 
-        let hour = Local::now().hour() as u8;
-        let (s, e) = self.active_hours;
-        let in_hours = if s <= e {
-            s <= hour && hour < e
-        } else {
-            !(e <= hour && hour < s)
-        };
-        if !in_hours {
-            return (
-                false,
-                format!("outside active hours ({s}:00-{e}:00)"),
-            );
+        if !is_within_active_hours(Local::now().hour(), self.active_hours) {
+            let (start, end) = self.active_hours;
+            return (false, format!("outside active hours ({start}:00-{end}:00)"));
         }
 
         if self.running {
@@ -181,21 +229,30 @@ impl HeartbeatRunner {
         (true, "all checks passed".into())
     }
 
-    /// Parse heartbeat response. HEARTBEAT_OK means nothing to report.
-    fn parse_response(&self, response: &str) -> Option<String> {
+    /// Parse heartbeat response. `HEARTBEAT_OK` means nothing to report.
+    fn parse_response(response: &str) -> Option<String> {
         if response.contains("HEARTBEAT_OK") {
-            let stripped =
-                response.replace("HEARTBEAT_OK", "").trim().to_string();
-            if stripped.is_empty() { None } else { Some(stripped) }
+            let stripped = response.replace("HEARTBEAT_OK", "").trim().to_string();
+            if stripped.is_empty() {
+                None
+            } else {
+                Some(stripped)
+            }
         } else {
             let trimmed = response.trim().to_string();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
         }
     }
 
     /// Build system prompt and instruction for heartbeat turn
     fn build_prompt(&mut self) -> Option<(String, String)> {
-        let raw = self.cached_content.as_ref().cloned()
+        let raw = self
+            .cached_content
+            .clone()
             .or_else(|| std::fs::read_to_string(&self.heartbeat_path).ok())?;
         let instructions = extract_body(&raw);
         if instructions.is_empty() {
@@ -209,11 +266,13 @@ impl HeartbeatRunner {
 
         if !self.memory.entries.is_empty() {
             let mem_block = format_memory_content(&self.memory.entries);
-            prompt.push_str(&format!("\n\n# Known Context\n\n{mem_block}"));
+            prompt.push_str("\n\n# Known Context\n\n");
+            prompt.push_str(&mem_block);
         }
 
         let now = Utc::now().format("%Y-%m-%d %H:%M UTC");
-        prompt.push_str(&format!("\n\nCurrent time: {now}"));
+        prompt.push_str("\n\nCurrent time: ");
+        prompt.push_str(&now.to_string());
 
         Some((instructions, prompt))
     }
@@ -221,7 +280,7 @@ impl HeartbeatRunner {
     /// Execute one heartbeat. Skip if session lane is active.
     async fn execute(&mut self) {
         let stats = self.lane_lock.lane_stats(LANE_SESSION).await;
-        if stats.map_or(false, |s| s.active > 0) {
+        if stats.is_some_and(|stats| stats.active > 0) {
             log::debug!("Heartbeat skipped: session lane occupied");
             return;
         }
@@ -234,7 +293,7 @@ impl HeartbeatRunner {
 
         self.lane_lock.mark_done(LANE_SESSION).await;
         self.running = false;
-        self.last_run_at = now_secs();
+        self.record_run();
 
         if let Err(e) = result {
             log::error!("Heartbeat error: {e}");
@@ -247,29 +306,19 @@ impl HeartbeatRunner {
     }
 
     async fn execute_inner(&mut self) -> anyhow::Result<()> {
-        let (instructions, sys_prompt) = match self.build_prompt() {
-            Some(p) => p,
-            None => return Ok(()),
+        let Some((instructions, sys_prompt)) = self.build_prompt() else {
+            return Ok(());
         };
 
-        let response =
-            run_single_turn(&sys_prompt, &instructions, &self.llm_config)
-                .await?;
-        let meaningful = match self.parse_response(&response) {
-            Some(m) => m,
-            None => return Ok(()),
+        let response = run_single_turn(&sys_prompt, &instructions, &self.llm_config).await?;
+        let Some(meaningful) = Self::parse_response(&response) else {
+            return Ok(());
         };
 
         if meaningful.trim() == self.last_output {
             return Ok(());
         }
-        self.last_output = meaningful.trim().to_string();
-        self.output_count += 1;
-        self.delivery.enqueue(
-            &self.delivery_channel,
-            &self.delivery_to,
-            &format!("[heartbeat] {meaningful}"),
-        );
+        self.record_output(&meaningful);
         Ok(())
     }
 
@@ -282,29 +331,15 @@ impl HeartbeatRunner {
 
         let result = match self.build_prompt() {
             Some((instructions, sys_prompt)) => {
-                match run_single_turn(
-                    &sys_prompt,
-                    &instructions,
-                    &self.llm_config,
-                )
-                .await
-                {
-                    Ok(response) => match self.parse_response(&response) {
-                        None => {
-                            "HEARTBEAT_OK (nothing to report)".to_string()
-                        }
+                match run_single_turn(&sys_prompt, &instructions, &self.llm_config).await {
+                    Ok(response) => match Self::parse_response(&response) {
+                        None => "HEARTBEAT_OK (nothing to report)".to_string(),
                         Some(m) if m.trim() == self.last_output => {
                             "duplicate content (skipped)".to_string()
                         }
                         Some(m) => {
-                            self.last_output = m.trim().to_string();
-                            self.output_count += 1;
+                            self.record_output(&m);
                             let len = m.len();
-                            self.delivery.enqueue(
-                                &self.delivery_channel,
-                                &self.delivery_to,
-                                &format!("[heartbeat] {m}"),
-                            );
                             format!("triggered, output queued ({len} chars)")
                         }
                     },
@@ -315,20 +350,16 @@ impl HeartbeatRunner {
         };
 
         self.running = false;
-        self.last_run_at = now_secs();
+        self.record_run();
         result
     }
 
     fn status(&mut self) -> HeartbeatStatus {
-        let now = now_secs();
-        let elapsed = if self.last_run_at > 0.0 {
-            Some(now - self.last_run_at)
-        } else {
-            None
-        };
-        let next_in = elapsed
-            .map(|e| (self.interval.as_secs_f64() - e).max(0.0))
-            .unwrap_or(self.interval.as_secs_f64());
+        let next_in = self
+            .elapsed_since_last_run()
+            .map_or(self.interval.as_secs_f64(), |elapsed| {
+                self.interval.saturating_sub(elapsed).as_secs_f64()
+            });
         let (ok, reason) = self.should_run();
 
         HeartbeatStatus {
@@ -336,21 +367,32 @@ impl HeartbeatRunner {
             running: self.running,
             should_run: ok,
             reason,
-            last_run: if self.last_run_at > 0.0 {
-                chrono::DateTime::from_timestamp(
-                    self.last_run_at as i64,
-                    0,
-                )
-                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                .unwrap_or_else(|| "unknown".into())
-            } else {
-                "never".into()
-            },
+            last_run: format_last_run(self.last_run_at),
             next_in: format!("{next_in:.0}s"),
             interval_secs: self.interval.as_secs_f64(),
             active_hours: self.active_hours,
             queue_size: self.output_count,
         }
+    }
+
+    fn elapsed_since_last_run(&self) -> Option<Duration> {
+        self.last_run_at
+            .and_then(|last_run| SystemTime::now().duration_since(last_run).ok())
+    }
+
+    fn record_output(&mut self, output: &str) {
+        self.last_output.clear();
+        self.last_output.push_str(output.trim());
+        self.output_count += 1;
+        self.delivery.enqueue(
+            &self.delivery_channel,
+            &self.delivery_to,
+            &heartbeat_message(output),
+        );
+    }
+
+    fn record_run(&mut self) {
+        self.last_run_at = Some(SystemTime::now());
     }
 }
 
@@ -362,15 +404,15 @@ impl HeartbeatRunner {
 ///
 /// # Arguments
 ///
-/// * `workspace_dir` - Agent workspace directory (contains HEARTBEAT.md)
+/// * `workspace_dir` - Agent workspace directory (contains `HEARTBEAT.md`)
 /// * `lane_lock` - Shared lane lock with the session
 /// * `llm_config` - LLM provider configuration
 /// * `identity` - Agent identity text for system prompt
 /// * `delivery` - Delivery handle for background output
-/// * `delivery_channel` - Outbound channel for delivery (e.g. "bg", "discord")
+/// * `delivery_channel` - Outbound channel for delivery (e.g. `bg`, `discord`)
 /// * `delivery_to` - Outbound target (e.g. Discord channel ID)
 pub fn spawn(
-    workspace_dir: PathBuf,
+    workspace_dir: &Path,
     lane_lock: LaneLock,
     llm_config: LLMConfig,
     identity: String,
@@ -382,15 +424,7 @@ pub fn spawn(
     let mut memory = MemoryStore::new(&workspace_dir.join("memory"));
     memory.discover();
 
-    let (interval, active_hours) = std::fs::read_to_string(&heartbeat_path)
-        .ok()
-        .map(|raw| parse_heartbeat_config(&parse_frontmatter(&raw)))
-        .unwrap_or_else(|| {
-            (
-                Duration::from_secs(tuning().heartbeat_interval_secs),
-                tuning().heartbeat_active_hours,
-            )
-        });
+    let (interval, active_hours) = load_heartbeat_config(&heartbeat_path);
 
     log::info!(
         "Heartbeat started for {} (interval={}s, hours={}:00-{}:00)",
@@ -413,15 +447,19 @@ pub fn spawn(
         delivery_to,
         interval,
         active_hours,
-        last_run_at: now_secs(),
+        last_run_at: Some(SystemTime::now()),
         running: false,
         last_output: String::new(),
         output_count: 0,
         cached_content: None,
+        cached_mtime: None,
+        cached_body: None,
     };
 
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(POLL_INTERVAL);
+        let mut tick = tokio::time::interval(Duration::from_millis(
+            tuning().scheduler.heartbeat_poll_interval_ms,
+        ));
         loop {
             tokio::select! {
                 _ = tick.tick() => {
@@ -468,31 +506,32 @@ mod tests {
             delivery: DeliveryHandle::noop(),
             delivery_channel: "bg".into(),
             delivery_to: String::new(),
-            interval: Duration::from_secs(tuning().heartbeat_interval_secs),
-            active_hours: tuning().heartbeat_active_hours,
-            last_run_at: 0.0,
+            interval: Duration::from_secs(tuning().scheduler.heartbeat_interval_secs),
+            active_hours: tuning().scheduler.heartbeat_active_hours,
+            last_run_at: None,
             running: false,
             last_output: String::new(),
             output_count: 0,
             cached_content: None,
+            cached_mtime: None,
+            cached_body: None,
         }
     }
 
     #[test]
     fn test_parse_response_ok() {
-        let runner = test_runner();
-        assert!(runner.parse_response("HEARTBEAT_OK").is_none());
-        assert!(runner.parse_response("HEARTBEAT_OK  ").is_none());
+        assert!(HeartbeatRunner::parse_response("HEARTBEAT_OK").is_none());
+        assert!(HeartbeatRunner::parse_response("HEARTBEAT_OK  ").is_none());
         assert_eq!(
-            runner.parse_response("HEARTBEAT_OK ok"),
+            HeartbeatRunner::parse_response("HEARTBEAT_OK ok"),
             Some("ok".to_string())
         );
-        assert!(runner
-            .parse_response("HEARTBEAT_OK something meaningful here")
-            .is_some());
-        assert!(runner.parse_response("").is_none());
+        assert!(
+            HeartbeatRunner::parse_response("HEARTBEAT_OK something meaningful here").is_some()
+        );
+        assert!(HeartbeatRunner::parse_response("").is_none());
         assert_eq!(
-            runner.parse_response("important update"),
+            HeartbeatRunner::parse_response("important update"),
             Some("important update".to_string())
         );
     }
@@ -509,8 +548,11 @@ mod tests {
     fn test_parse_heartbeat_config_defaults() {
         let meta = HashMap::new();
         let (interval, hours) = parse_heartbeat_config(&meta);
-        assert_eq!(interval.as_secs(), tuning().heartbeat_interval_secs);
-        assert_eq!(hours, tuning().heartbeat_active_hours);
+        assert_eq!(
+            interval.as_secs(),
+            tuning().scheduler.heartbeat_interval_secs
+        );
+        assert_eq!(hours, tuning().scheduler.heartbeat_active_hours);
     }
 
     #[test]
@@ -529,6 +571,6 @@ mod tests {
         meta.insert("interval".into(), "300".into());
         let (interval, hours) = parse_heartbeat_config(&meta);
         assert_eq!(interval.as_secs(), 300);
-        assert_eq!(hours, tuning().heartbeat_active_hours);
+        assert_eq!(hours, tuning().scheduler.heartbeat_active_hours);
     }
 }

@@ -1,228 +1,118 @@
+//! Application configuration.
+//!
+//! `AppConfig` is the user-facing root of the configuration tree, loaded
+//! from `config.toml`. It composes:
+//!
+//! - `LlmSettings` — LLM provider profiles (`[llm]` section).
+//! - `FrontendConfig` — Frontend mode and managed-service startup policy.
+//! - `Tuning` — Tunable runtime parameters (intervals, timeouts, limits)
+//!   accessible globally via [`tuning`].
+//! - `WorkspaceConfig` — Optional workspace directory pointing at the
+//!   per-agent file tree (`.agents/`, `routes.json`, `HEARTBEAT.md`, …).
+
+use std::path::Path;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 
-use anyhow::{Result, anyhow, ensure};
+use anyhow::Result;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
-use crate::resilience::profile::AuthProfile;
+mod frontend;
+mod llm;
+mod tuning;
 
-const CONFIG_PATH: &str = "config.json";
+use self::frontend::{FrontendConfig, ServicesConfig};
+pub use self::frontend::{FrontendMode, ServiceStartup, StartupPolicy};
+pub use self::llm::{
+    LLMConfig, LlmSettings, add_llm, list_llm_profiles, remove_llm, set_primary_llm,
+};
+use self::tuning::set_tuning;
+pub use self::tuning::{
+    AgentTuning, CompactionTuning, DeliveryTuning, FrontendTuning, LimitTuning, LoggingTuning,
+    RatioBps, ResilienceTuning, RoutingTuning, SchedulerTuning, TimeoutTuning, Tuning, tuning,
+};
 
-static TUNING: OnceLock<Tuning> = OnceLock::new();
+const CONFIG_PATH: &str = "config.toml";
 
-/// Access the global tuning parameters
-///
-/// Returns the config-loaded values if `AppConfig::load()` has run,
-/// otherwise falls back to compiled defaults (useful in tests).
-pub fn tuning() -> &'static Tuning {
-    TUNING.get_or_init(Tuning::default)
+fn config_path() -> PathBuf {
+    PathBuf::from(CONFIG_PATH)
 }
 
-/// Runtime-tunable parameters
-///
-/// All fields have sensible defaults. Override via the `"tuning"` key in `config.json`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+fn read_config<T>(path: &Path) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let raw = std::fs::read_to_string(path)?;
+    Ok(toml_edit::de::from_str(&raw)?)
+}
+
+fn render_config<T>(value: &T) -> Result<String>
+where
+    T: Serialize,
+{
+    Ok(format!(
+        "# MinusAgent config\n# User-facing runtime settings live here.\n\n{}",
+        toml_edit::ser::to_string_pretty(value)?
+    ))
+}
+
+fn write_config<T>(path: &Path, value: &T) -> Result<()>
+where
+    T: Serialize,
+{
+    let rendered = render_config(value)?;
+    std::fs::write(path, rendered)?;
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Tuning {
-    // ── Agent ──
-    /// CoT turns without todo updates before nagging LLM
-    pub nag_threshold: usize,
-    /// Max CoT turns for subagents
-    pub max_subagent_turns: usize,
-    /// Max CoT turns for teammates
-    pub max_teammate_turns: usize,
-    /// Context-window usage ratio triggering auto-compact (L2)
-    pub compact_threshold: f64,
-    /// Max consecutive auto-compact failures before circuit breaker trips
-    pub compact_max_failures: usize,
-    /// Auto-compact summary budget as ratio of context window (L2)
-    pub compact_summary_ratio: f64,
-    /// Full-compact summary budget as ratio of context window (L3)
-    pub full_compact_summary_ratio: f64,
-
-    // ── Timeouts (seconds) ──
-    /// Bash command execution timeout
-    pub bash_timeout_secs: u64,
-    /// Background task execution timeout
-    pub bg_timeout_secs: u64,
-    /// Teammate idle timeout before shutdown
-    pub idle_timeout_secs: u64,
-    /// Teammate idle polling interval
-    pub idle_poll_interval_secs: u64,
-    /// Discord reconnection delay
-    pub reconnect_delay_secs: u64,
-    /// Default heartbeat interval (overridden by HEARTBEAT.md frontmatter)
-    pub heartbeat_interval_secs: u64,
-    /// Default heartbeat active hours (overridden by HEARTBEAT.md frontmatter)
-    pub heartbeat_active_hours: (u8, u8),
-
-    // ── Limits ──
-    /// Max notification message length before truncation
-    pub notification_max_len: usize,
-    /// Max background task output length before truncation
-    pub output_max_len: usize,
-    /// Max CLI display output bytes
-    pub cli_max_output_bytes: usize,
-    /// Max skills to discover
-    pub max_skills: usize,
-    /// Max chars per bootstrap file
-    pub bootstrap_max_file_chars: usize,
-    /// Max total chars for bootstrap context
-    pub bootstrap_max_total_chars: usize,
-    /// Max tracked files in read_file_state before clearing
-    pub max_tracked_files: usize,
-    /// Max results returned by glob tool
-    pub glob_max_results: usize,
-    /// Max matches returned by grep tool
-    pub grep_max_results: usize,
-    /// Max response body length (chars) for web_fetch before truncation
-    pub web_fetch_max_body: usize,
-    /// HTTP timeout for web_fetch / web_search (seconds)
-    pub web_timeout_secs: u64,
-
-    // ── Resilience ──
-    /// Max overflow compaction attempts
-    pub max_overflow_compaction: usize,
-    /// Cooldown for auth/billing failures (seconds)
-    pub auth_cooldown_secs: u64,
-    /// Cooldown for rate-limit failures (seconds)
-    pub rate_limit_cooldown_secs: u64,
-    /// Cooldown for timeout failures (seconds)
-    pub timeout_cooldown_secs: u64,
-
-    // ── Delivery ──
-    /// Max delivery retry attempts
-    pub delivery_max_retries: u32,
-    /// Exponential backoff schedule (milliseconds)
-    pub delivery_backoff_ms: Vec<u64>,
-    /// Default message chunk size
-    pub delivery_chunk_limit: usize,
-
-    // ── Cron ──
-    /// Consecutive errors before auto-disabling a cron job
-    pub cron_auto_disable_threshold: u32,
-
-    // ── Routing ──
-    /// Default agent ID for unbound sessions
-    pub default_agent_id: String,
-
-    // ── Logging ──
-    /// Log level: error, warn, info, debug, trace (overridden by `RUST_LOG` env var)
-    pub log_level: String,
+pub struct WorkspaceConfig {
+    pub dir: Option<PathBuf>,
 }
 
-impl Default for Tuning {
+impl Default for WorkspaceConfig {
     fn default() -> Self {
         Self {
-            nag_threshold: 3,
-            max_subagent_turns: 30,
-            max_teammate_turns: 50,
-            compact_threshold: 0.87,
-            compact_max_failures: 3,
-            compact_summary_ratio: 0.10,
-            full_compact_summary_ratio: 0.25,
-
-            bash_timeout_secs: 120,
-            bg_timeout_secs: 300,
-            idle_timeout_secs: 60,
-            idle_poll_interval_secs: 5,
-            reconnect_delay_secs: 5,
-            heartbeat_interval_secs: 1800,
-            heartbeat_active_hours: (9, 22),
-
-            notification_max_len: 500,
-            output_max_len: 50_000,
-            cli_max_output_bytes: 100_000,
-            max_skills: 150,
-            bootstrap_max_file_chars: 20_000,
-            bootstrap_max_total_chars: 150_000,
-            max_tracked_files: 1000,
-            glob_max_results: 500,
-            grep_max_results: 200,
-            web_fetch_max_body: 50_000,
-            web_timeout_secs: 30,
-
-            max_overflow_compaction: 2,
-            auth_cooldown_secs: 300,
-            rate_limit_cooldown_secs: 120,
-            timeout_cooldown_secs: 60,
-
-            delivery_max_retries: 5,
-            delivery_backoff_ms: vec![5_000, 25_000, 120_000, 600_000],
-            delivery_chunk_limit: 4096,
-
-            cron_auto_disable_threshold: 5,
-
-            default_agent_id: "mandeven".into(),
-
-            log_level: "info".into(),
+            dir: Some(PathBuf::from("./workspace")),
         }
     }
 }
 
 /// Build a config template from struct defaults
-fn config_template() -> String {
-    let template = json!({
-        "llm": [LLMConfig::default()],
-        "workspace_dir": "./workspace",
-        "tuning": Tuning::default(),
-    });
-    serde_json::to_string_pretty(&template).unwrap()
+fn config_template() -> Result<String> {
+    render_config(&AppConfig::default())
 }
 
 /// Resolve a string value: if it starts with `$`, treat as env var reference.
-fn resolve(value: &mut String) {
+fn resolve(value: &mut String, config_path: &Path) {
     if let Some(var) = value.strip_prefix('$') {
-        *value = std::env::var(var)
-            .unwrap_or_else(|_| panic!("env var ${var} not set (referenced in {CONFIG_PATH})"));
-    }
-}
-
-/// LLM provider configuration
-///
-/// First entry in the `llm` array is the primary profile.
-/// Additional entries provide auth rotation (api_key + base_url).
-#[derive(Clone, Serialize, Deserialize)]
-pub struct LLMConfig {
-    pub model: String,
-    pub base_url: String,
-    pub api_key: String,
-    pub context_window: usize,
-}
-
-impl Default for LLMConfig {
-    fn default() -> Self {
-        Self {
-            model: "labs-leanstral-2603".into(),
-            base_url: "https://api.mistral.ai/v1/".into(),
-            api_key: "$MISTRAL_API_KEY".into(),
-            context_window: 256_000,
-        }
+        *value = std::env::var(var).unwrap_or_else(|_| {
+            panic!(
+                "env var ${var} not set (referenced in {})",
+                config_path.display()
+            )
+        });
     }
 }
 
 /// Unified application configuration
 ///
-/// Loaded from `config.json` at startup.
+/// Loaded from `config.toml` at startup.
 /// String values starting with `$` are resolved as environment variables.
-#[derive(Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppConfig {
-    /// LLM profiles. First = primary, rest = auth rotation.
-    pub llm: Vec<LLMConfig>,
-    #[serde(default)]
-    pub fallback_models: Vec<String>,
-    #[serde(default)]
-    pub workspace_dir: Option<PathBuf>,
-    #[serde(default)]
-    pub discord_token: Option<String>,
+    pub llm: LlmSettings,
+    pub workspace: WorkspaceConfig,
+    frontend: FrontendConfig,
+    services: ServicesConfig,
     /// Runtime-tunable parameters (all have sensible defaults)
-    #[serde(default)]
     pub tuning: Tuning,
 }
 
 impl AppConfig {
-    /// Load configuration from `config.json`
+    /// Load configuration from `config.toml`
     ///
     /// String values starting with `$` are resolved as environment variables,
     /// so secrets can live in the shell profile instead of the config file.
@@ -231,35 +121,49 @@ impl AppConfig {
     ///
     /// Panics if the file is missing, malformed, `llm` array is empty,
     /// or a referenced env var is not set.
+    #[must_use]
     pub fn load() -> Self {
-        let path = std::path::Path::new(CONFIG_PATH);
-        let raw = match std::fs::read_to_string(path) {
+        let config_path = config_path();
+        let raw = match std::fs::read_to_string(&config_path) {
             Ok(content) => content,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::write(path, config_template())
-                    .unwrap_or_else(|e| panic!("Failed to create {CONFIG_PATH}: {e}"));
-                panic!("Created {CONFIG_PATH} — please fill in your configuration and restart");
+                let template = config_template()
+                    .unwrap_or_else(|e| panic!("Failed to render {}: {e}", config_path.display()));
+                std::fs::write(&config_path, template).unwrap_or_else(|err| {
+                    panic!("Failed to create {}: {err}", config_path.display())
+                });
+                panic!(
+                    "Created {} — please fill in your configuration and restart",
+                    config_path.display()
+                );
             }
-            Err(e) => panic!("Failed to read {CONFIG_PATH}: {e}"),
+            Err(e) => panic!("Failed to read {}: {e}", config_path.display()),
         };
-        let mut config: Self = serde_json::from_str(&raw)
-            .unwrap_or_else(|e| panic!("Failed to parse {CONFIG_PATH}: {e}"));
+        let mut config: Self = toml_edit::de::from_str(&raw)
+            .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", config_path.display()));
 
-        assert!(!config.llm.is_empty(), "llm array must have at least one entry");
+        assert!(
+            !config.llm.profiles.is_empty(),
+            "llm array must have at least one entry"
+        );
 
         // Resolve $ENV_VAR references
-        for llm in &mut config.llm {
-            resolve(&mut llm.api_key);
-            resolve(&mut llm.base_url);
+        for llm in &mut config.llm.profiles {
+            resolve(&mut llm.api_key, &config_path);
+            resolve(&mut llm.base_url, &config_path);
         }
-        if let Some(ref mut token) = config.discord_token {
-            resolve(token);
+        resolve(&mut config.frontend.websocket.host, &config_path);
+        if let Some(ref mut token) = config.frontend.discord.token {
+            resolve(token, &config_path);
         }
 
-        config.workspace_dir = match config.workspace_dir {
+        config.workspace.dir = match config.workspace.dir {
             Some(ws) if ws.is_dir() => Some(ws),
             Some(ws) => {
-                log::warn!("workspace_dir {ws:?} is not a directory, ignoring");
+                log::warn!(
+                    "workspace_dir {} is not a directory, ignoring",
+                    ws.display()
+                );
                 None
             }
             None => {
@@ -269,115 +173,188 @@ impl AppConfig {
         };
 
         // Publish tuning as a global singleton
-        let _ = TUNING.set(config.tuning.clone());
+        set_tuning(config.tuning.clone());
 
         config
     }
 
     /// Primary LLM config (first entry)
+    #[must_use]
     pub fn primary_llm(&self) -> &LLMConfig {
-        &self.llm[0]
+        &self.llm.profiles[0]
     }
 
     /// Extra profiles for auth rotation (entries after the first)
+    #[must_use]
     pub fn extra_profiles(&self) -> &[LLMConfig] {
-        &self.llm[1..]
+        &self.llm.profiles[1..]
+    }
+
+    /// Fallback model list for resilience failover.
+    #[must_use]
+    pub fn fallback_models(&self) -> &[String] {
+        &self.llm.fallback_models
+    }
+
+    /// Workspace root directory, if configured and present.
+    #[must_use]
+    pub fn workspace_dir(&self) -> Option<&Path> {
+        self.workspace.dir.as_deref()
+    }
+
+    /// Discord bot token, if configured.
+    #[must_use]
+    pub fn discord_token(&self) -> Option<&str> {
+        self.frontend.discord.token.as_deref()
+    }
+
+    /// Default frontend entry mode when no CLI override is provided.
+    #[must_use]
+    pub const fn frontend_mode(&self) -> FrontendMode {
+        self.frontend.startup.mode
+    }
+
+    /// Startup policy for the cron service.
+    #[must_use]
+    pub const fn cron_startup(&self) -> ServiceStartup {
+        self.services.cron
+    }
+
+    /// Startup policy for the delivery service.
+    #[must_use]
+    pub const fn delivery_startup(&self) -> ServiceStartup {
+        self.services.delivery
+    }
+
+    /// Startup policy for the Discord gateway.
+    #[must_use]
+    pub const fn discord_startup(&self) -> ServiceStartup {
+        self.services.discord
+    }
+
+    /// Startup policy for the WebSocket gateway.
+    #[must_use]
+    pub const fn websocket_startup(&self) -> ServiceStartup {
+        self.services.websocket
+    }
+
+    /// WebSocket host for the RPC gateway.
+    #[must_use]
+    pub fn websocket_host(&self) -> &str {
+        &self.frontend.websocket.host
+    }
+
+    /// WebSocket port for the RPC gateway.
+    #[must_use]
+    pub const fn websocket_port(&self) -> u16 {
+        self.frontend.websocket.port
     }
 }
 
-impl LLMConfig {
-    /// Convert to an AuthProfile for the resilience layer
-    pub fn to_auth_profile(&self) -> AuthProfile {
-        AuthProfile::new(self.api_key.clone(), Some(self.base_url.clone()))
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::{
+        AppConfig, FrontendMode, LLMConfig, LlmSettings, RatioBps, ServiceStartup, StartupPolicy,
+        Tuning, WorkspaceConfig, read_config, write_config,
+    };
+
+    #[test]
+    fn test_ratio_bps_accepts_decimal_and_basis_points() {
+        let tuning: Tuning = serde_json::from_str(
+            r#"{
+                "compaction": {
+                    "compact_threshold": 0.875,
+                    "compact_summary_ratio": 1250,
+                    "full_compact_summary_ratio": "0.25"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(tuning.compaction.compact_threshold.apply_to(10_000), 8_750);
+        assert_eq!(
+            tuning.compaction.compact_summary_ratio.apply_to(10_000),
+            1_250
+        );
+        assert_eq!(
+            tuning
+                .compaction
+                .full_compact_summary_ratio
+                .apply_to(10_000),
+            2_500
+        );
     }
-}
 
-// ── LLM profile management (persists to config.json) ──────
+    #[test]
+    fn test_ratio_bps_rejects_excess_precision() {
+        let result = serde_json::from_str::<RatioBps>("0.12345");
+        assert!(result.is_err());
+    }
 
-/// Read config.json as raw JSON value
-fn read_raw() -> Result<serde_json::Value> {
-    let raw = std::fs::read_to_string(CONFIG_PATH)?;
-    Ok(serde_json::from_str(&raw)?)
-}
+    #[test]
+    fn test_toml_config_roundtrip_preserves_llm_and_frontend() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let config = AppConfig {
+            llm: LlmSettings {
+                profiles: vec![LLMConfig {
+                    model: "gpt-x".into(),
+                    base_url: "https://example.com/v1".into(),
+                    api_key: "$TEST_KEY".into(),
+                    context_window: 128_000,
+                }],
+                fallback_models: vec!["gpt-y".into()],
+            },
+            workspace: WorkspaceConfig {
+                dir: Some("./workspace".into()),
+            },
+            ..AppConfig::default()
+        };
+        let mut config = config;
+        config.frontend.startup.mode = FrontendMode::Stdio;
+        config.services.discord = ServiceStartup::new(true, StartupPolicy::Runtime);
+        config.services.websocket = ServiceStartup::new(true, StartupPolicy::Config);
 
-/// Write raw JSON value back to config.json
-fn write_raw(value: &serde_json::Value) -> Result<()> {
-    let pretty = serde_json::to_string_pretty(value)?;
-    std::fs::write(CONFIG_PATH, pretty)?;
-    Ok(())
-}
+        write_config(&config_path, &config).unwrap();
+        let loaded: AppConfig = read_config(&config_path).unwrap();
 
-/// Read-modify-write the `llm` array in config.json
-fn update_llm_array(
-    f: impl FnOnce(&mut Vec<serde_json::Value>) -> Result<()>,
-) -> Result<()> {
-    let mut root = read_raw()?;
-    let arr = root
-        .get_mut("llm")
-        .and_then(|v| v.as_array_mut())
-        .ok_or_else(|| anyhow!("missing or invalid `llm` array in {CONFIG_PATH}"))?;
-    f(arr)?;
-    write_raw(&root)
-}
+        assert_eq!(loaded.primary_llm().model, "gpt-x");
+        assert_eq!(loaded.fallback_models(), ["gpt-y"]);
+        assert_eq!(loaded.frontend_mode(), FrontendMode::Stdio);
+        assert_eq!(
+            loaded.discord_startup(),
+            ServiceStartup::new(true, StartupPolicy::Runtime)
+        );
+        assert_eq!(
+            loaded.websocket_startup(),
+            ServiceStartup::new(true, StartupPolicy::Config)
+        );
+        assert_eq!(loaded.websocket_host(), "localhost");
+        assert_eq!(loaded.websocket_port(), 8765);
+    }
 
-/// Find a model's index in the llm array by name
-fn find_model(arr: &[serde_json::Value], model: &str) -> Result<usize> {
-    arr.iter()
-        .position(|v| v.get("model").and_then(|m| m.as_str()) == Some(model))
-        .ok_or_else(|| anyhow!("model {model:?} not found"))
-}
+    #[test]
+    fn test_toml_config_includes_frontend_tables() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let config = AppConfig::default();
 
-/// Add an LLM profile to config.json
-///
-/// # Errors
-///
-/// Returns error if config.json is unreadable or the `llm` array is missing.
-pub fn add_llm(config: &LLMConfig) -> Result<()> {
-    update_llm_array(|arr| {
-        arr.push(serde_json::to_value(config)?);
-        Ok(())
-    })
-}
+        write_config(&config_path, &config).unwrap();
+        let raw = std::fs::read_to_string(&config_path).unwrap();
 
-/// Remove an LLM profile by model name
-///
-/// # Errors
-///
-/// Returns error if the model is not found or it is the only entry.
-pub fn remove_llm(model: &str) -> Result<()> {
-    update_llm_array(|arr| {
-        let idx = find_model(arr, model)?;
-        ensure!(arr.len() > 1, "cannot remove the only LLM profile");
-        arr.remove(idx);
-        Ok(())
-    })
-}
+        assert!(raw.contains("dir = \"./workspace\""));
+        assert!(raw.contains("[frontend.startup]"));
+        assert!(raw.contains("[services.cron]"));
+        assert!(raw.contains("[services.delivery]"));
+        assert!(raw.contains("[services.discord]"));
+        assert!(raw.contains("[services.websocket]"));
+        assert!(raw.contains("[frontend.websocket]"));
+        assert!(raw.contains("[frontend.discord]"));
+        assert!(raw.contains("[tuning.agent]"));
+        assert!(raw.contains("[tuning.compaction]"));
+        assert!(raw.contains("[tuning.delivery]"));
+    }
 
-/// Set an LLM profile as primary (move to index 0) by model name
-///
-/// # Errors
-///
-/// Returns error if the model is not found.
-pub fn set_primary_llm(model: &str) -> Result<()> {
-    update_llm_array(|arr| {
-        let idx = find_model(arr, model)?;
-        if idx != 0 {
-            let entry = arr.remove(idx);
-            arr.insert(0, entry);
-        }
-        Ok(())
-    })
-}
-
-/// List all LLM profiles, primary first
-pub fn list_llm_profiles() -> Result<Vec<LLMConfig>> {
-    let root = read_raw()?;
-    let arr = root
-        .get("llm")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| anyhow!("missing or invalid `llm` array in {CONFIG_PATH}"))?;
-    Ok(arr
-        .iter()
-        .filter_map(|v| serde_json::from_value(v.clone()).ok())
-        .collect())
 }

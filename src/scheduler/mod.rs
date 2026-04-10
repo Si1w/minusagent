@@ -1,3 +1,12 @@
+//! Background scheduling: heartbeat, cron, and the per-session lane lock.
+//!
+//! - [`heartbeat`] — Per-session heartbeat task that periodically asks the
+//!   agent to act on its own (e.g. process its inbox, run idle work).
+//! - [`cron`] — Global cron scheduler with three schedule types
+//!   (`every`, `at`, raw cron) and auto-disable on repeated failures.
+//! - [`lane`] — Cooperative lane lock that lets user turns preempt
+//!   background work on the same session.
+
 pub mod cron;
 pub mod heartbeat;
 pub mod lane;
@@ -8,12 +17,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use anyhow::Result;
 
 use crate::engine::agent::Agent;
-use crate::engine::store::{
-    Config, Context, LLMConfig, Message, Role, SharedStore, SystemState,
-};
-use crate::team::{BackgroundManager, TodoManager};
+use crate::engine::store::{Config, Context, LLMConfig, Message, Role, SharedStore, SystemState};
 use crate::frontend::SilentChannel;
 use crate::routing::protocol::ToolPolicy;
+use crate::team::{BackgroundManager, TodoManager};
 
 /// Per-session lane name shared by user turns and heartbeat
 pub const LANE_SESSION: &str = "session";
@@ -30,14 +37,15 @@ pub fn init_bg_output() {
 
 /// Push a message to the background output buffer
 pub fn push_bg_output(msg: String) {
-    if let Some(buf) = BG_OUTPUT.get() {
-        if let Ok(mut v) = buf.lock() {
-            v.push(msg);
-        }
+    if let Some(buf) = BG_OUTPUT.get()
+        && let Ok(mut v) = buf.lock()
+    {
+        v.push(msg);
     }
 }
 
 /// Current time as fractional seconds since UNIX epoch
+#[must_use]
 pub fn now_secs() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -56,7 +64,7 @@ pub fn drain_bg_output() -> Vec<String> {
 
 /// Run a single agent turn in isolation
 ///
-/// Creates a throwaway SharedStore, pushes one user message, runs the CoT
+/// Creates a throwaway `SharedStore`, pushes one user message, runs the `CoT`
 /// loop, and returns the final assistant response text.
 ///
 /// # Arguments
@@ -113,8 +121,7 @@ pub async fn run_single_turn(
         },
     };
 
-    let channel: Arc<dyn crate::frontend::Channel> =
-        Arc::new(SilentChannel);
+    let channel: Arc<dyn crate::frontend::Channel> = Arc::new(SilentChannel);
     let http = reqwest::Client::new();
     let agent = Agent;
     agent.run(&mut store, &channel, &http, None).await?;

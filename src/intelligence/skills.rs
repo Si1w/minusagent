@@ -15,6 +15,7 @@ pub struct Skill {
 
 impl Skill {
     /// Load the full body (after frontmatter) from the SKILL.md file
+    #[must_use]
     pub fn load_body(&self) -> Option<String> {
         let content = std::fs::read_to_string(&self.path).ok()?;
         let body = extract_body(&content);
@@ -34,6 +35,7 @@ pub struct SkillsManager {
 
 impl SkillsManager {
     /// Create a new skills manager for the given workspace directory
+    #[must_use]
     pub fn new(workspace_dir: &Path) -> Self {
         Self {
             workspace_dir: workspace_dir.to_path_buf(),
@@ -66,17 +68,20 @@ impl SkillsManager {
                     Some(n) if !n.is_empty() => n.clone(),
                     _ => continue,
                 };
-                seen.insert(name.clone(), Skill {
-                    name,
-                    description: f.meta.get("description").cloned().unwrap_or_default(),
-                    path: f.path,
-                });
+                seen.insert(
+                    name.clone(),
+                    Skill {
+                        name,
+                        description: f.meta.get("description").cloned().unwrap_or_default(),
+                        path: f.path,
+                    },
+                );
             }
         }
 
         self.skills = seen.into_values().collect();
         self.skills.sort_by(|a, b| a.name.cmp(&b.name));
-        self.skills.truncate(tuning().max_skills);
+        self.skills.truncate(tuning().limits.max_skills);
     }
 }
 
@@ -97,10 +102,10 @@ mod tests {
     fn test_discover_with_skill() {
         let dir = tempfile::tempdir().unwrap();
         let skills_dir = dir.path().join("skills");
-        let skill_dir = skills_dir.join("greet");
-        fs::create_dir_all(&skill_dir).unwrap();
+        let greet_dir = skills_dir.join("greet");
+        fs::create_dir_all(&greet_dir).unwrap();
         fs::write(
-            skill_dir.join("SKILL.md"),
+            greet_dir.join("SKILL.md"),
             "---\nname: greet\ndescription: Say hello\n---\nGreets the user.",
         )
         .unwrap();

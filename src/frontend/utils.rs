@@ -4,6 +4,7 @@
 ///
 /// * `text` - The text to split
 /// * `max_len` - Maximum byte length per chunk
+#[must_use]
 pub fn chunk_text(text: &str, max_len: usize) -> Vec<&str> {
     if text.len() <= max_len {
         return vec![text];
@@ -23,20 +24,19 @@ pub fn chunk_text(text: &str, max_len: usize) -> Vec<&str> {
             text[start..end]
                 .char_indices()
                 .map(|(i, _)| start + i)
-                .last()
+                .next_back()
                 .unwrap_or(start)
         };
         if safe_end <= start {
             // Single char wider than max_len — take one char to avoid infinite loop
-            let next = start + text[start..].chars().next().map_or(1, |c| c.len_utf8());
+            let next = start + text[start..].chars().next().map_or(1, char::len_utf8);
             chunks.push(&text[start..next]);
             start = next;
             continue;
         }
         let cut = text[start..safe_end]
             .rfind('\n')
-            .map(|i| start + i + 1)
-            .unwrap_or(safe_end);
+            .map_or(safe_end, |i| start + i + 1);
         chunks.push(&text[start..cut]);
         start = cut;
     }

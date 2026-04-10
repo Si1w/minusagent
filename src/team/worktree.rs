@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -43,6 +44,10 @@ impl WorktreeManager {
     ///
     /// * `dir` - Directory to store worktrees (e.g. `.worktrees/`)
     /// * `repo_root` - Git repository root for running git commands
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the worktree storage directory cannot be created.
     pub fn new(dir: PathBuf, repo_root: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&dir)?;
         Ok(Self { dir, repo_root })
@@ -53,11 +58,11 @@ impl WorktreeManager {
     /// # Returns
     ///
     /// The created entry as pretty-printed JSON.
-    pub fn create(
-        &self,
-        name: &str,
-        task_id: Option<usize>,
-    ) -> Result<String> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `git worktree add` fails or the index cannot be persisted.
+    pub fn create(&self, name: &str, task_id: Option<usize>) -> Result<String> {
         let wt_path = self.dir.join(name);
         let abs_path = self
             .dir
@@ -81,8 +86,7 @@ impl WorktreeManager {
             .output()?;
 
         if !output.status.success() {
-            let stderr =
-                String::from_utf8_lossy(&output.stderr);
+            let stderr = String::from_utf8_lossy(&output.stderr);
             self.emit("worktree.create.failed", name, task_id);
             return Err(anyhow::anyhow!(
                 "git worktree add failed: {}",
@@ -120,23 +124,20 @@ impl WorktreeManager {
     /// # Returns
     ///
     /// The removed entry (with updated status).
-    pub fn remove(
-        &self,
-        name: &str,
-        force: bool,
-    ) -> Result<WorktreeEntry> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the worktree does not exist, is already removed,
+    /// `git worktree remove` fails, or the index cannot be persisted.
+    pub fn remove(&self, name: &str, force: bool) -> Result<WorktreeEntry> {
         let mut index = self.load_index();
         let idx = index
             .iter()
             .position(|e| e.name == name)
-            .ok_or_else(|| {
-                anyhow::anyhow!("Worktree '{name}' not found")
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("Worktree '{name}' not found"))?;
 
         if index[idx].status == WorktreeStatus::Removed {
-            return Err(anyhow::anyhow!(
-                "Worktree '{name}' already removed"
-            ));
+            return Err(anyhow::anyhow!("Worktree '{name}' already removed"));
         }
 
         let task_id = index[idx].task_id;
@@ -155,8 +156,7 @@ impl WorktreeManager {
             .output()?;
 
         if !output.status.success() {
-            let stderr =
-                String::from_utf8_lossy(&output.stderr);
+            let stderr = String::from_utf8_lossy(&output.stderr);
             self.emit("worktree.remove.failed", name, task_id);
             return Err(anyhow::anyhow!(
                 "git worktree remove failed: {}",
@@ -173,14 +173,17 @@ impl WorktreeManager {
     }
 
     /// Mark a worktree as kept (preserved for later use)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the worktree does not exist or the updated index
+    /// cannot be written.
     pub fn keep(&self, name: &str) -> Result<String> {
         let mut index = self.load_index();
         let entry = index
             .iter_mut()
             .find(|e| e.name == name)
-            .ok_or_else(|| {
-                anyhow::anyhow!("Worktree '{name}' not found")
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("Worktree '{name}' not found"))?;
         entry.status = WorktreeStatus::Kept;
         let task_id = entry.task_id;
         self.save_index(&index)?;
@@ -194,11 +197,13 @@ impl WorktreeManager {
     }
 
     /// Get a worktree entry by name
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<WorktreeEntry> {
         self.load_index().into_iter().find(|e| e.name == name)
     }
 
     /// Format worktrees for display
+    #[must_use]
     pub fn list_formatted(&self) -> String {
         let entries = self.load_index();
         if entries.is_empty() {
@@ -206,56 +211,41 @@ impl WorktreeManager {
         }
         let mut output = String::from("Worktrees:\n");
         for e in &entries {
-            let status = match e.status {
-                WorktreeStatus::Active => "active",
-                WorktreeStatus::Removed => "removed",
-                WorktreeStatus::Kept => "kept",
-            };
-            let task = match e.task_id {
-                Some(id) => format!("task=#{id}"),
-                None => "task=none".into(),
-            };
-            output.push_str(&format!(
-                "  {} [{}] {} branch={}\n",
-                e.name, status, task, e.branch,
-            ));
+            let _ = writeln!(
+                output,
+                "  {} [{}] {} branch={}",
+                e.name,
+                status_label(&e.status),
+                format_task_label(e.task_id),
+                e.branch,
+            );
         }
         output
     }
 
     /// Read the events log
+    #[must_use]
     pub fn events(&self) -> String {
         let path = self.dir.join("events.jsonl");
-        std::fs::read_to_string(&path)
-            .unwrap_or_else(|_| "No events.".into())
+        std::fs::read_to_string(&path).unwrap_or_else(|_| "No events.".into())
     }
 
     fn load_index(&self) -> Vec<WorktreeEntry> {
         let path = self.dir.join("index.json");
         match std::fs::read_to_string(&path) {
-            Ok(content) => {
-                serde_json::from_str(&content).unwrap_or_default()
-            }
+            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
             Err(_) => Vec::new(),
         }
     }
 
-    fn save_index(
-        &self,
-        index: &[WorktreeEntry],
-    ) -> Result<()> {
+    fn save_index(&self, index: &[WorktreeEntry]) -> Result<()> {
         let path = self.dir.join("index.json");
         let content = serde_json::to_string_pretty(index)?;
         std::fs::write(path, content)?;
         Ok(())
     }
 
-    fn emit(
-        &self,
-        event: &str,
-        name: &str,
-        task_id: Option<usize>,
-    ) {
+    fn emit(&self, event: &str, name: &str, task_id: Option<usize>) {
         let ts = now_secs();
         let entry = serde_json::json!({
             "event": event,
@@ -272,6 +262,18 @@ impl WorktreeManager {
                 .and_then(|mut f| writeln!(f, "{line}"));
         }
     }
+}
+
+fn status_label(status: &WorktreeStatus) -> &'static str {
+    match status {
+        WorktreeStatus::Active => "active",
+        WorktreeStatus::Removed => "removed",
+        WorktreeStatus::Kept => "kept",
+    }
+}
+
+fn format_task_label(task_id: Option<usize>) -> String {
+    task_id.map_or_else(|| "task=none".to_string(), |id| format!("task=#{id}"))
 }
 
 #[cfg(test)]
@@ -298,9 +300,7 @@ mod tests {
     #[test]
     fn test_index_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr =
-            WorktreeManager::new(dir.path().into(), dir.path().into())
-                .unwrap();
+        let mgr = WorktreeManager::new(dir.path().into(), dir.path().into()).unwrap();
 
         assert!(mgr.list().is_empty());
 
@@ -321,9 +321,7 @@ mod tests {
     #[test]
     fn test_events_log() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr =
-            WorktreeManager::new(dir.path().into(), dir.path().into())
-                .unwrap();
+        let mgr = WorktreeManager::new(dir.path().into(), dir.path().into()).unwrap();
 
         mgr.emit("test.event", "wt1", Some(1));
         mgr.emit("test.event2", "wt2", None);
@@ -338,12 +336,10 @@ mod tests {
     fn test_create_and_list() {
         let repo = init_test_repo();
         let wt_dir = repo.path().join(".worktrees");
-        let mgr =
-            WorktreeManager::new(wt_dir, repo.path().into())
-                .unwrap();
+        let mgr = WorktreeManager::new(wt_dir, repo.path().into()).unwrap();
 
         let result = mgr.create("feat-a", Some(1));
-        assert!(result.is_ok(), "create failed: {:?}", result);
+        assert!(result.is_ok(), "create failed: {result:?}");
 
         let entries = mgr.list();
         assert_eq!(entries.len(), 1);
@@ -357,25 +353,19 @@ mod tests {
     fn test_create_duplicate() {
         let repo = init_test_repo();
         let wt_dir = repo.path().join(".worktrees");
-        let mgr =
-            WorktreeManager::new(wt_dir, repo.path().into())
-                .unwrap();
+        let mgr = WorktreeManager::new(wt_dir, repo.path().into()).unwrap();
 
         mgr.create("dup", None).unwrap();
         let err = mgr.create("dup", None);
         assert!(err.is_err());
-        assert!(
-            err.unwrap_err().to_string().contains("already exists")
-        );
+        assert!(err.unwrap_err().to_string().contains("already exists"));
     }
 
     #[test]
     fn test_remove() {
         let repo = init_test_repo();
         let wt_dir = repo.path().join(".worktrees");
-        let mgr =
-            WorktreeManager::new(wt_dir, repo.path().into())
-                .unwrap();
+        let mgr = WorktreeManager::new(wt_dir, repo.path().into()).unwrap();
 
         mgr.create("rm-me", None).unwrap();
         let entry = mgr.remove("rm-me", false).unwrap();
@@ -389,9 +379,7 @@ mod tests {
     fn test_keep() {
         let repo = init_test_repo();
         let wt_dir = repo.path().join(".worktrees");
-        let mgr =
-            WorktreeManager::new(wt_dir, repo.path().into())
-                .unwrap();
+        let mgr = WorktreeManager::new(wt_dir, repo.path().into()).unwrap();
 
         mgr.create("keep-me", None).unwrap();
         mgr.keep("keep-me").unwrap();
@@ -403,9 +391,7 @@ mod tests {
     #[test]
     fn test_list_formatted() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr =
-            WorktreeManager::new(dir.path().into(), dir.path().into())
-                .unwrap();
+        let mgr = WorktreeManager::new(dir.path().into(), dir.path().into()).unwrap();
 
         let entries = vec![
             WorktreeEntry {
