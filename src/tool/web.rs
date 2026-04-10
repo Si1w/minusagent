@@ -12,7 +12,9 @@ fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(tuning().web_timeout_secs))
+            .timeout(std::time::Duration::from_secs(
+                tuning().timeouts.web_timeout_secs,
+            ))
             .build()
             .expect("failed to build HTTP client")
     })
@@ -43,21 +45,24 @@ impl Node for WebFetch {
             return Ok(format!("HTTP {status}"));
         }
 
-        let is_html = resp
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|ct| ct.contains("text/html"));
+        let is_html = is_html_content_type(
+            resp.headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+        );
 
         let body = resp.text().await?;
-        let body = if is_html { html_to_markdown(&body) } else { body };
+        let body = if is_html {
+            html_to_markdown(&body)
+        } else {
+            body
+        };
 
-        let max = self.max_length.unwrap_or(tuning().web_fetch_max_body);
+        let max = self
+            .max_length
+            .unwrap_or(tuning().limits.web_fetch_max_body);
         if body.len() > max {
-            Ok(format!(
-                "{}...\n[truncated at {max} chars]",
-                &body[..max]
-            ))
+            Ok(format!("{}...\n[truncated at {max} chars]", &body[..max]))
         } else {
             Ok(body)
         }
@@ -74,7 +79,13 @@ impl Node for WebFetch {
     }
 }
 
-/// Search the web via DuckDuckGo HTML and return results
+fn is_html_content_type(content_type: Option<&str>) -> bool {
+    content_type
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/html"))
+}
+
+/// Search the web via `DuckDuckGo` HTML and return results
 pub struct WebSearch {
     pub call_id: String,
     pub query: String,
@@ -163,7 +174,7 @@ fn collapse_blank_lines(text: &str) -> String {
     result
 }
 
-/// Extract search results from DuckDuckGo HTML response
+/// Extract search results from `DuckDuckGo` HTML response
 fn parse_ddg_results(html: &str) -> String {
     let mut results = Vec::new();
     let mut idx = 0;
@@ -172,9 +183,8 @@ fn parse_ddg_results(html: &str) -> String {
         let pos = idx + start;
         idx = pos + 1;
 
-        let href = match extract_attr(&html[pos..], "href") {
-            Some(h) => h,
-            None => continue,
+        let Some(href) = extract_attr(&html[pos..], "href") else {
+            continue;
         };
 
         let title = match extract_tag_text(&html[pos..]) {
@@ -285,23 +295,29 @@ mod tests {
         assert_eq!(result, "a\n\n\nb");
     }
 
-    #[tokio::test]
-    async fn test_web_fetch_html_to_markdown() {
-        let resp = reqwest::Client::new()
-            .get("https://example.com")
-            .send()
-            .await
-            .expect("failed to fetch example.com");
-        let is_html = resp
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|ct| ct.contains("text/html"));
-        assert!(is_html, "example.com should return HTML");
+    #[test]
+    fn test_is_html_content_type() {
+        assert!(is_html_content_type(Some("text/html")));
+        assert!(is_html_content_type(Some("text/html; charset=utf-8")));
+        assert!(!is_html_content_type(Some("application/json")));
+        assert!(!is_html_content_type(None));
+    }
 
-        let body = resp.text().await.unwrap();
-        let md = html_to_markdown(&body);
+    #[test]
+    fn test_example_style_html_converts_without_network() {
+        let html = r"
+        <html>
+        <body>
+            <h1>Example Domain</h1>
+            <p>This domain is for use in illustrative examples.</p>
+        </body>
+        </html>
+        ";
+        let md = html_to_markdown(html);
         assert!(md.contains("Example Domain"), "should contain title: {md}");
-        assert!(!md.contains("<h1>"), "should not contain raw HTML tags: {md}");
+        assert!(
+            !md.contains("<h1>"),
+            "should not contain raw HTML tags: {md}"
+        );
     }
 }

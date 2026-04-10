@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::fmt::Write;
 use std::io;
 use std::sync::Arc;
 
@@ -6,9 +7,12 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use futures_util::StreamExt;
 use ratatui::prelude::*;
-use ratatui::widgets::*;
+use ratatui::widgets::{
+    Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+};
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::Duration;
+use unicode_width::UnicodeWidthStr;
 
 use crate::config::tuning;
 use crate::frontend::{Channel, UserMessage};
@@ -33,7 +37,7 @@ struct TuiState {
 impl TuiState {
     /// Trim output buffer from the front if it exceeds the max size
     fn trim_output(&mut self) {
-        let max_bytes = tuning().cli_max_output_bytes;
+        let max_bytes = tuning().frontend.cli_max_output_bytes;
         if self.output.len() > max_bytes {
             let cut = self.output.len() - max_bytes;
             // Find a char boundary after the cut point
@@ -42,11 +46,53 @@ impl TuiState {
             self.output_dirty = true;
         }
     }
+
+    fn mark_output_changed(&mut self) {
+        self.output_dirty = true;
+        self.auto_scroll = true;
+        self.trim_output();
+    }
+
+    fn ensure_output_break(&mut self) {
+        if !self.output.ends_with('\n') {
+            self.output.push('\n');
+        }
+    }
+
+    fn append_paragraph(&mut self, text: &str) {
+        self.ensure_output_break();
+        self.output.push_str(text);
+        if !self.output.ends_with('\n') {
+            self.output.push('\n');
+        }
+        self.output.push('\n');
+        self.mark_output_changed();
+    }
+
+    fn append_user_input(&mut self, text: &str) {
+        self.ensure_output_break();
+        self.output.push_str("❯ ");
+        self.output.push_str(text);
+        self.output.push_str("\n\n");
+        self.mark_output_changed();
+    }
+
+    fn append_confirm_prompt(&mut self, command: &str) {
+        self.ensure_output_break();
+        let _ = writeln!(self.output, "Execute: `{command}` (y/n)");
+        self.mark_output_changed();
+    }
 }
 
 /// Interactive CLI frontend using ratatui TUI
 pub struct Cli {
     state: Arc<Mutex<TuiState>>,
+}
+
+impl Default for Cli {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Restore terminal to normal mode
@@ -57,6 +103,11 @@ pub fn cleanup_terminal() {
 
 impl Cli {
     /// Create a new CLI with TUI event loop
+    ///
+    /// # Panics
+    ///
+    /// Panics if raw mode, alternate screen, or terminal backend initialization fails.
+    #[must_use]
     pub fn new() -> Self {
         let state = Arc::new(Mutex::new(TuiState {
             output: BANNER.to_string(),
@@ -74,8 +125,7 @@ impl Cli {
         crossterm::execute!(io::stdout(), EnterAlternateScreen)
             .expect("failed to enter alternate screen");
         let backend = CrosstermBackend::new(io::stdout());
-        let terminal =
-            Terminal::new(backend).expect("failed to create terminal");
+        let terminal = Terminal::new(backend).expect("failed to create terminal");
 
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
@@ -99,19 +149,7 @@ async fn run_event_loop(
     loop {
         {
             let mut s = state.lock().await;
-
-            for entry in crate::logger::TuiLogger::drain() {
-                s.output.push_str(&format!("{entry}\n\n"));
-                s.output_dirty = true;
-                s.auto_scroll = true;
-            }
-
-            for msg in crate::scheduler::drain_bg_output() {
-                s.output.push_str(&msg);
-                s.output.push_str("\n\n");
-                s.output_dirty = true;
-                s.auto_scroll = true;
-            }
+            drain_runtime_output(&mut s);
 
             let _ = terminal.draw(|f| render(&mut s, f));
         }
@@ -120,74 +158,13 @@ async fn run_event_loop(
             event = reader.next() => {
                 if let Some(Ok(Event::Key(key))) = event {
                     let mut s = state.lock().await;
-
-                    if key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
-                    {
+                    if handle_key_event(key, &mut s) {
                         cleanup_terminal();
                         std::process::exit(0);
                     }
-
-                    match key.code {
-                        KeyCode::Char(c) => {
-                            let pos = s.byte_cursor();
-                            s.input.insert(pos, c);
-                            s.cursor += 1;
-                        }
-                        KeyCode::Backspace => {
-                            if s.cursor > 0 {
-                                s.cursor -= 1;
-                                let pos = s.byte_cursor();
-                                s.input.remove(pos);
-                            }
-                        }
-                        KeyCode::Left => {
-                            s.cursor = s.cursor.saturating_sub(1);
-                        }
-                        KeyCode::Right => {
-                            let len = s.input.chars().count();
-                            if s.cursor < len {
-                                s.cursor += 1;
-                            }
-                        }
-                        KeyCode::Enter => {
-                            if s.input_sender.is_some() {
-                                let text = std::mem::take(&mut s.input);
-                                s.cursor = 0;
-                                s.output
-                                    .push_str(&format!("❯ {text}\n\n"));
-                                s.output_dirty = true;
-                                s.auto_scroll = true;
-                                if let Some(tx) = s.input_sender.take() {
-                                    let _ = tx.send(text);
-                                }
-                            }
-                        }
-                        KeyCode::Up => {
-                            s.scroll = s.scroll.saturating_sub(1);
-                            s.auto_scroll = false;
-                        }
-                        KeyCode::Down => {
-                            s.scroll = s.scroll.saturating_add(1);
-                        }
-                        KeyCode::Esc => {
-                            if s.input_sender.is_some() {
-                                s.input.clear();
-                                s.cursor = 0;
-                                if let Some(tx) = s.input_sender.take() {
-                                    let _ = tx.send(String::new());
-                                }
-                            }
-                        }
-                        KeyCode::Home => s.cursor = 0,
-                        KeyCode::End => {
-                            s.cursor = s.input.chars().count();
-                        }
-                        _ => {}
-                    }
                 }
             }
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            () = tokio::time::sleep(Duration::from_millis(tuning().frontend.cli_refresh_interval_ms)) => {}
         }
     }
 }
@@ -197,9 +174,12 @@ impl TuiState {
         self.input
             .char_indices()
             .nth(self.cursor)
-            .map(|(i, _)| i)
-            .unwrap_or(self.input.len())
+            .map_or(self.input.len(), |(i, _)| i)
     }
+}
+
+struct OutputMetrics {
+    max_scroll: u16,
 }
 
 fn render(state: &mut TuiState, frame: &mut Frame) {
@@ -212,7 +192,12 @@ fn render(state: &mut TuiState, frame: &mut Frame) {
         ])
         .split(frame.area());
 
-    // ── Output area ──
+    let output_metrics = render_output_area(state, frame, chunks[0]);
+    render_status_bar(state, frame, chunks[1], output_metrics.max_scroll);
+    render_input_area(state, frame, chunks[2]);
+}
+
+fn render_output_area(state: &mut TuiState, frame: &mut Frame, area: Rect) -> OutputMetrics {
     let title = Line::from(vec![
         Span::raw(" "),
         Span::styled("minus", Style::default().fg(Color::White).bold()),
@@ -224,8 +209,9 @@ fn render(state: &mut TuiState, frame: &mut Frame) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Indexed(238)))
         .title(title);
-    let inner_width = block.inner(chunks[0]).width;
-    let inner_height = block.inner(chunks[0]).height;
+    let inner = block.inner(area);
+    let inner_width = inner.width;
+    let inner_height = inner.height;
 
     if state.output_dirty || state.cached_display.is_none() {
         let parsed = tui_markdown::from_str(&state.output);
@@ -249,30 +235,16 @@ fn render(state: &mut TuiState, frame: &mut Frame) {
         state.cached_display = Some(Text::from(owned_lines));
         state.output_dirty = false;
     }
-    let mut display_text = state.cached_display.clone().unwrap();
+    let mut display_text = state.cached_display.clone().unwrap_or_default();
     if !state.stream_buf.is_empty() {
         for line in state.stream_buf.split('\n') {
             display_text.push_line(Line::raw(line));
         }
     }
-    use unicode_width::UnicodeWidthStr;
-    let total_lines: u16 = display_text
-        .lines
-        .iter()
-        .map(|line| {
-            let w = inner_width.max(1) as usize;
-            let line_width: usize = line
-                .spans
-                .iter()
-                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-                .sum();
-            1 + line_width.saturating_sub(1) / w
-        })
-        .sum::<usize>() as u16;
+    let total_lines = total_display_lines(&display_text, inner_width);
     let max_scroll = total_lines.saturating_sub(inner_height);
 
-    let output =
-        Paragraph::new(display_text).wrap(Wrap { trim: false });
+    let output = Paragraph::new(display_text).wrap(Wrap { trim: false });
 
     if state.auto_scroll {
         state.scroll = max_scroll;
@@ -281,9 +253,8 @@ fn render(state: &mut TuiState, frame: &mut Frame) {
     }
 
     let output = output.block(block).scroll((state.scroll, 0));
-    frame.render_widget(output, chunks[0]);
+    frame.render_widget(output, area);
 
-    // ── Scrollbar ──
     if total_lines > inner_height {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
@@ -292,11 +263,11 @@ fn render(state: &mut TuiState, frame: &mut Frame) {
             .track_style(Style::default().fg(Color::Indexed(236)))
             .thumb_symbol("┃")
             .thumb_style(Style::default().fg(Color::Indexed(245)));
-        let mut scrollbar_state = ScrollbarState::new(max_scroll as usize)
-            .position(state.scroll as usize);
+        let mut scrollbar_state =
+            ScrollbarState::new(usize::from(max_scroll)).position(usize::from(state.scroll));
         frame.render_stateful_widget(
             scrollbar,
-            chunks[0].inner(ratatui::layout::Margin {
+            area.inner(Margin {
                 vertical: 1,
                 horizontal: 0,
             }),
@@ -304,70 +275,43 @@ fn render(state: &mut TuiState, frame: &mut Frame) {
         );
     }
 
-    // ── Status bar ──
+    OutputMetrics { max_scroll }
+}
+
+fn render_status_bar(state: &TuiState, frame: &mut Frame, area: Rect, max_scroll: u16) {
     let waiting = state.input_sender.is_some();
     let status_left = if waiting {
-        Span::styled(
-            " ● ready ",
-            Style::default().fg(Color::Green),
-        )
+        Span::styled(" ● ready ", Style::default().fg(Color::Green))
     } else {
-        Span::styled(
-            " ◌ thinking... ",
-            Style::default().fg(Color::Yellow),
-        )
+        Span::styled(" ◌ thinking... ", Style::default().fg(Color::Yellow))
     };
     let hints = Line::from(vec![
-        Span::styled(
-            "/new ",
-            Style::default().fg(Color::Indexed(243)),
-        ),
-        Span::styled(
-            "/save ",
-            Style::default().fg(Color::Indexed(243)),
-        ),
-        Span::styled(
-            "/compact ",
-            Style::default().fg(Color::Indexed(243)),
-        ),
-        Span::styled(
-            "/team ",
-            Style::default().fg(Color::Indexed(243)),
-        ),
-        Span::styled(
-            "/agents ",
-            Style::default().fg(Color::Indexed(243)),
-        ),
-        Span::styled(
-            "/help ",
-            Style::default().fg(Color::Indexed(243)),
-        ),
+        Span::styled("/new ", Style::default().fg(Color::Indexed(243))),
+        Span::styled("/save ", Style::default().fg(Color::Indexed(243))),
+        Span::styled("/compact ", Style::default().fg(Color::Indexed(243))),
+        Span::styled("/team ", Style::default().fg(Color::Indexed(243))),
+        Span::styled("/agents ", Style::default().fg(Color::Indexed(243))),
+        Span::styled("/help ", Style::default().fg(Color::Indexed(243))),
     ]);
     let scroll_pct = if max_scroll > 0 {
         format!(
             "{}% ",
-            (state.scroll as u32 * 100) / max_scroll as u32,
+            (u32::from(state.scroll) * 100) / u32::from(max_scroll),
         )
     } else {
         String::new()
     };
-    let status_right = Span::styled(
-        scroll_pct,
-        Style::default().fg(Color::Indexed(243)),
-    );
+    let status_right = Span::styled(scroll_pct, Style::default().fg(Color::Indexed(243)));
 
     let status_bar = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(status_left.width() as u16),
+            Constraint::Length(usize_to_u16_saturating(status_left.width())),
             Constraint::Min(1),
-            Constraint::Length(status_right.width() as u16),
+            Constraint::Length(usize_to_u16_saturating(status_right.width())),
         ])
-        .split(chunks[1]);
-    frame.render_widget(
-        Paragraph::new(status_left),
-        status_bar[0],
-    );
+        .split(area);
+    frame.render_widget(Paragraph::new(status_left), status_bar[0]);
     frame.render_widget(
         Paragraph::new(hints).alignment(Alignment::Center),
         status_bar[1],
@@ -376,8 +320,10 @@ fn render(state: &mut TuiState, frame: &mut Frame) {
         Paragraph::new(status_right).alignment(Alignment::Right),
         status_bar[2],
     );
+}
 
-    // ── Input area ──
+fn render_input_area(state: &TuiState, frame: &mut Frame, area: Rect) {
+    let waiting = state.input_sender.is_some();
     let prompt = if waiting { "❯ " } else { "  " };
     let input_text = format!("{prompt}{}", state.input);
     let border_color = if waiting {
@@ -391,19 +337,109 @@ fn render(state: &mut TuiState, frame: &mut Frame) {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border_color)),
     );
-    frame.render_widget(input, chunks[2]);
+    frame.render_widget(input, area);
 
     if waiting {
-        use unicode_width::UnicodeWidthStr;
         let byte_pos = state.byte_cursor();
         let display_width =
-            UnicodeWidthStr::width(&state.input[..byte_pos]) as u16;
+            usize_to_u16_saturating(UnicodeWidthStr::width(&state.input[..byte_pos]));
         // "❯ " is 2 display columns (❯ = 1 wide + space)
-        frame.set_cursor_position((
-            chunks[2].x + 1 + 2 + display_width,
-            chunks[2].y + 1,
-        ));
+        frame.set_cursor_position((area.x + 1 + 2 + display_width, area.y + 1));
     }
+}
+
+fn total_display_lines(display_text: &Text<'_>, inner_width: u16) -> u16 {
+    let width = usize::from(inner_width.max(1));
+    let total = display_text
+        .lines
+        .iter()
+        .map(|line| {
+            let line_width: usize = line
+                .spans
+                .iter()
+                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                .sum();
+            1 + line_width.saturating_sub(1) / width
+        })
+        .sum::<usize>();
+    usize_to_u16_saturating(total)
+}
+
+fn usize_to_u16_saturating(value: usize) -> u16 {
+    u16::try_from(value).unwrap_or(u16::MAX)
+}
+
+fn drain_runtime_output(state: &mut TuiState) {
+    for entry in crate::logger::TuiLogger::drain() {
+        state.append_paragraph(&entry.to_string());
+    }
+
+    for msg in crate::scheduler::drain_bg_output() {
+        state.append_paragraph(&msg);
+    }
+}
+
+fn handle_key_event(key: crossterm::event::KeyEvent, state: &mut TuiState) -> bool {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return true;
+    }
+
+    match key.code {
+        KeyCode::Char(c) => {
+            let pos = state.byte_cursor();
+            state.input.insert(pos, c);
+            state.cursor += 1;
+        }
+        KeyCode::Backspace => {
+            if state.cursor > 0 {
+                state.cursor -= 1;
+                let pos = state.byte_cursor();
+                state.input.remove(pos);
+            }
+        }
+        KeyCode::Left => {
+            state.cursor = state.cursor.saturating_sub(1);
+        }
+        KeyCode::Right => {
+            let len = state.input.chars().count();
+            if state.cursor < len {
+                state.cursor += 1;
+            }
+        }
+        KeyCode::Enter => {
+            if state.input_sender.is_some() {
+                let text = std::mem::take(&mut state.input);
+                state.cursor = 0;
+                state.append_user_input(&text);
+                if let Some(tx) = state.input_sender.take() {
+                    let _ = tx.send(text);
+                }
+            }
+        }
+        KeyCode::Up => {
+            state.scroll = state.scroll.saturating_sub(1);
+            state.auto_scroll = false;
+        }
+        KeyCode::Down => {
+            state.scroll = state.scroll.saturating_add(1);
+        }
+        KeyCode::Esc => {
+            if state.input_sender.is_some() {
+                state.input.clear();
+                state.cursor = 0;
+                if let Some(tx) = state.input_sender.take() {
+                    let _ = tx.send(String::new());
+                }
+            }
+        }
+        KeyCode::Home => state.cursor = 0,
+        KeyCode::End => {
+            state.cursor = state.input.chars().count();
+        }
+        _ => {}
+    }
+
+    false
 }
 
 #[async_trait::async_trait]
@@ -429,29 +465,13 @@ impl Channel for Cli {
 
     async fn send(&self, text: &str) {
         let mut state = self.state.lock().await;
-        if !state.output.ends_with('\n') {
-            state.output.push('\n');
-        }
-        if !text.is_empty() {
-            state.output.push_str(text);
-            state.output.push('\n');
-        }
-        state.output.push('\n');
-        state.output_dirty = true;
-        state.trim_output();
-        state.auto_scroll = true;
+        state.append_paragraph(text);
     }
 
     async fn confirm(&self, command: &str) -> bool {
         {
             let mut state = self.state.lock().await;
-            if !state.output.ends_with('\n') {
-                state.output.push('\n');
-            }
-            state.output
-                .push_str(&format!("Execute: `{command}` (y/n)\n"));
-            state.output_dirty = true;
-            state.auto_scroll = true;
+            state.append_confirm_prompt(command);
         }
 
         let (tx, rx) = oneshot::channel();
@@ -471,18 +491,13 @@ impl Channel for Cli {
 
     async fn flush(&self) {
         let mut state = self.state.lock().await;
-        if !state.output.ends_with('\n') {
-            state.output.push('\n');
-        }
+        state.ensure_output_break();
         let stream = std::mem::take(&mut state.stream_buf);
         state.output.push_str(&stream);
         if !state.output.ends_with('\n') {
             state.output.push('\n');
         }
         state.output.push('\n');
-        state.output_dirty = true;
-        state.trim_output();
-        state.auto_scroll = true;
+        state.mark_output_changed();
     }
 }
-

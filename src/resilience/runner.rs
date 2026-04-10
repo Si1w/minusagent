@@ -3,11 +3,11 @@ use std::sync::atomic::AtomicBool;
 
 use anyhow::Result;
 
+use crate::config::tuning;
 use crate::engine::agent::Agent;
 use crate::engine::store::SharedStore;
 use crate::frontend::Channel;
 use crate::resilience::classify::{FailoverReason, classify_failure};
-use crate::config::tuning;
 use crate::resilience::profile::ProfileManager;
 
 /// Three-layer resilient runner wrapping `Agent::run()`
@@ -21,6 +21,7 @@ pub struct ResilienceRunner {
 }
 
 impl ResilienceRunner {
+    #[must_use]
     pub fn new(profiles: ProfileManager, fallback_models: Vec<String>) -> Self {
         Self {
             profiles,
@@ -42,7 +43,7 @@ impl ResilienceRunner {
         store: &mut SharedStore,
         channel: &Arc<dyn Channel>,
         http: &reqwest::Client,
-        interrupted: &Option<Arc<AtomicBool>>,
+        interrupted: Option<&Arc<AtomicBool>>,
     ) -> Result<Option<usize>> {
         // Save original LLM config for restoration
         let original_api_key = store.state.config.llm.api_key.clone();
@@ -60,13 +61,13 @@ impl ResilienceRunner {
         let last_err = result.unwrap_err();
 
         // All profiles exhausted — try fallback models
-        for fallback_model in &self.fallback_models.clone() {
+        for fallback_model in self.fallback_models.clone() {
             log::warn!("resilience: trying fallback model {fallback_model}");
-            store.state.config.llm.model = fallback_model.clone();
+            store.state.config.llm.model.clone_from(&fallback_model);
 
             // Reset profile cooldowns for fallback attempt
             let result = self
-                .try_with_profiles(store, channel, http, fallback_model, interrupted)
+                .try_with_profiles(store, channel, http, &fallback_model, interrupted)
                 .await;
 
             if let Ok(tokens) = result {
@@ -91,25 +92,23 @@ impl ResilienceRunner {
         channel: &Arc<dyn Channel>,
         http: &reqwest::Client,
         model: &str,
-        interrupted: &Option<Arc<AtomicBool>>,
+        interrupted: Option<&Arc<AtomicBool>>,
     ) -> Result<Option<usize>> {
         let mut last_err = anyhow::anyhow!("no profiles available");
 
         for _ in 0..self.profiles.len() {
-            let idx = match self.profiles.select() {
-                Some(idx) => idx,
-                None => break,
+            let Some(idx) = self.profiles.select() else {
+                break;
             };
 
             let profile = self.profiles.get(idx).expect("valid index");
-            store.state.config.llm.api_key = profile.api_key.clone();
-            if let Some(base_url) = &profile.base_url {
-                store.state.config.llm.base_url = base_url.clone();
-            }
-            store.state.config.llm.model = model.to_string();
+            apply_profile(store, profile, model);
 
             // LAYER 2: Overflow Recovery
-            match self.try_with_compaction(store, channel, http, interrupted).await {
+            match self
+                .try_with_compaction(store, channel, http, interrupted)
+                .await
+            {
                 Ok(tokens) => {
                     self.profiles.mark_success(idx);
                     return Ok(tokens);
@@ -118,19 +117,16 @@ impl ResilienceRunner {
                     let reason = classify_failure(&e);
                     let cooldown = reason.default_cooldown_secs();
 
-                    match reason {
-                        FailoverReason::Overflow => {
-                            // Overflow already handled in Layer 2, profile is fine
-                            last_err = e;
-                        }
-                        _ => {
-                            log::warn!(
-                                "resilience: profile {idx} failed ({reason}), \
-                                 cooldown {cooldown}s"
-                            );
-                            self.profiles.mark_failure(idx, reason, cooldown);
-                            last_err = e;
-                        }
+                    if reason == FailoverReason::Overflow {
+                        // Overflow already handled in Layer 2, profile is fine
+                        last_err = e;
+                    } else {
+                        log::warn!(
+                            "resilience: profile {idx} failed ({reason}), \
+                             cooldown {cooldown}s"
+                        );
+                        self.profiles.mark_failure(idx, reason, cooldown);
+                        last_err = e;
                     }
                 }
             }
@@ -145,19 +141,19 @@ impl ResilienceRunner {
         store: &mut SharedStore,
         channel: &Arc<dyn Channel>,
         http: &reqwest::Client,
-        interrupted: &Option<Arc<AtomicBool>>,
+        interrupted: Option<&Arc<AtomicBool>>,
     ) -> Result<Option<usize>> {
         let agent = Agent;
 
-        for attempt in 0..tuning().max_overflow_compaction {
+        for attempt in 0..tuning().resilience.max_overflow_compaction {
             // LAYER 3: Agent::run() — the tool-use loop
-            match agent.run(store, channel, http, interrupted.clone()).await {
+            match agent.run(store, channel, http, interrupted.cloned()).await {
                 Ok(tokens) => return Ok(tokens),
                 Err(e) => {
                     let reason = classify_failure(&e);
 
                     if reason == FailoverReason::Overflow
-                        && attempt + 1 < tuning().max_overflow_compaction
+                        && attempt + 1 < tuning().resilience.max_overflow_compaction
                     {
                         log::warn!(
                             "resilience: overflow on attempt {}, compacting history",
@@ -195,11 +191,11 @@ impl ResilienceRunner {
 
         // Truncate oversized tool results in kept messages
         for msg in &mut store.context.history[drain_end..] {
-            if let Some(ref mut content) = msg.content {
-                if content.len() > 2000 {
-                    content.truncate(2000);
-                    content.push_str("\n[truncated]");
-                }
+            if let Some(ref mut content) = msg.content
+                && content.len() > tuning().resilience.emergency_tool_truncate_chars
+            {
+                content.truncate(tuning().resilience.emergency_tool_truncate_chars);
+                content.push_str("\n[truncated]");
             }
         }
 
@@ -213,9 +209,23 @@ impl ResilienceRunner {
     }
 
     /// Profile status for display
+    #[must_use]
     pub fn profile_status(&self) -> Vec<String> {
         self.profiles.status_lines()
     }
+}
+
+fn apply_profile(
+    store: &mut SharedStore,
+    profile: &crate::resilience::profile::AuthProfile,
+    model: &str,
+) {
+    store.state.config.llm.api_key.clone_from(&profile.api_key);
+    if let Some(base_url) = &profile.base_url {
+        store.state.config.llm.base_url.clone_from(base_url);
+    }
+    store.state.config.llm.model.clear();
+    store.state.config.llm.model.push_str(model);
 }
 
 #[cfg(test)]
@@ -224,10 +234,10 @@ mod tests {
     use crate::engine::store::{Config, Context, LLMConfig, Message, Role, SystemState};
     use std::collections::HashMap;
 
-    use crate::team::{BackgroundManager, TodoManager};
     use crate::intelligence::manager::SharedAgents;
     use crate::resilience::profile::AuthProfile;
     use crate::routing::protocol::ToolPolicy;
+    use crate::team::{BackgroundManager, TodoManager};
 
     fn test_store() -> SharedStore {
         SharedStore {
@@ -235,7 +245,11 @@ mod tests {
                 system_prompt: "test".into(),
                 history: (0..20)
                     .map(|i| Message {
-                        role: if i % 2 == 0 { Role::User } else { Role::Assistant },
+                        role: if i % 2 == 0 {
+                            Role::User
+                        } else {
+                            Role::Assistant
+                        },
                         content: Some(format!("message {i}")),
                         tool_calls: None,
                         tool_call_id: None,
@@ -365,13 +379,9 @@ mod tests {
 
     #[test]
     fn test_new_with_fallbacks() {
-        let profiles = ProfileManager::new(vec![
-            AuthProfile::new("key-a".into(), None),
-        ]);
-        let runner = ResilienceRunner::new(
-            profiles,
-            vec!["gpt-4o-mini".into(), "gpt-3.5-turbo".into()],
-        );
+        let profiles = ProfileManager::new(vec![AuthProfile::new("key-a".into(), None)]);
+        let runner =
+            ResilienceRunner::new(profiles, vec!["gpt-4o-mini".into(), "gpt-3.5-turbo".into()]);
         assert_eq!(runner.fallback_models.len(), 2);
     }
 }

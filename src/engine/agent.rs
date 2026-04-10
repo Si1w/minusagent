@@ -7,18 +7,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 
-use crate::engine::llm::LLMCall;
-use crate::engine::node::Node;
-use crate::engine::store::{
-    Config, Context, LLMConfig, Message, Role, SharedStore, SystemState,
-};
 use crate::config::tuning;
+use crate::engine::llm::{LLMCall, ResponseToolCall};
+use crate::engine::node::Node;
+use crate::engine::store::{Config, Context, LLMConfig, Message, Role, SharedStore, SystemState};
 use crate::frontend::{Channel, SilentChannel};
 use crate::intelligence::Intelligence;
 use crate::intelligence::manager::SharedAgents;
 use crate::routing::protocol::ToolPolicy;
-use crate::team::{BackgroundManager, TaskManager, TodoManager};
+use crate::team::{BackgroundManager, TaskManager, TodoManager, append_reminder};
 use crate::tool::dispatch_tool;
+
+const BACKGROUND_RESULTS_ACK: &str = "Noted background results.";
+const INBOX_RESULTS_ACK: &str = "Noted inbox messages.";
+const TODO_REMINDER: &str = "\n\n<reminder>Update your todos.</reminder>";
 
 /// Options for the chain-of-thought loop
 pub struct CotOptions {
@@ -37,6 +39,10 @@ pub struct CotOptions {
 /// # Returns
 ///
 /// The `total_tokens` from the last LLM call, if available.
+///
+/// # Errors
+///
+/// Returns error if the LLM call fails or a tool dispatch errors.
 pub async fn cot_loop(
     store: &mut SharedStore,
     channel: &Arc<dyn Channel>,
@@ -51,73 +57,16 @@ pub async fn cot_loop(
 
     let mut turns: usize = 0;
     loop {
-        if let Some(flag) = &opts.interrupted {
-            if flag.swap(false, Ordering::Relaxed) {
-                channel.send("[interrupted]").await;
-                break;
-            }
+        if should_interrupt(opts, channel).await {
+            break;
         }
 
-        if let Some(max) = opts.max_turns {
-            if turns >= max {
-                break;
-            }
+        if reached_turn_limit(turns, opts) {
+            break;
         }
         turns += 1;
 
-        // Drain background task notifications before LLM call
-        let notifs = store.state.background.drain_notifications();
-        if !notifs.is_empty() {
-            let notif_text: String = notifs
-                .iter()
-                .map(|(id, result)| format!("[bg:{id}] {result}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            store.context.history.push(Message {
-                role: Role::User,
-                content: Some(format!(
-                    "<background-results>\n\
-                     {notif_text}\n\
-                     </background-results>"
-                )),
-                tool_calls: None,
-                tool_call_id: None,
-            });
-            store.context.history.push(Message {
-                role: Role::Assistant,
-                content: Some(
-                    "Noted background results.".into(),
-                ),
-                tool_calls: None,
-                tool_call_id: None,
-            });
-        }
-
-        // Drain team inbox before LLM call
-        if let Some(team) = &store.state.team {
-            let name = store.state.sender_name();
-            let msgs = team.bus().read_inbox(name);
-            if !msgs.is_empty() {
-                let inbox_json =
-                    serde_json::to_string(&msgs).unwrap_or_default();
-                store.context.history.push(Message {
-                    role: Role::User,
-                    content: Some(format!(
-                        "<inbox>\n{inbox_json}\n</inbox>"
-                    )),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
-                store.context.history.push(Message {
-                    role: Role::Assistant,
-                    content: Some(
-                        "Noted inbox messages.".into(),
-                    ),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
-            }
-        }
+        inject_runtime_updates(store);
 
         let response = llm.run(store).await?;
 
@@ -125,80 +74,150 @@ pub async fn cot_loop(
             last_total_tokens = Some(usage.total_tokens);
         }
 
-        match response.tool_calls {
-            Some(tool_calls) => {
-                let mut had_todo = false;
-                for tc in &tool_calls {
-                    if tc.name == "todo" {
-                        had_todo = true;
-                    }
-                    let handled = dispatch_tool(
-                        &tc.name,
-                        tc.id.clone(),
-                        &tc.arguments,
-                        store,
-                        channel,
-                    )
-                    .await?;
-
-                    if !handled {
-                        store.context.history.push(Message {
-                            role: Role::Tool,
-                            content: Some(format!(
-                                "Unknown tool: {}",
-                                tc.name
-                            )),
-                            tool_calls: None,
-                            tool_call_id: Some(tc.id.clone()),
-                        });
-                    }
-                }
-
-                // Check if idle was requested by a tool
-                if store.state.idle_requested {
-                    store.state.idle_requested = false;
-                    break;
-                }
-
-                if opts.nag_reminder {
-                    if had_todo {
-                        store.state.todo.rounds_since_update = 0;
-                    } else {
-                        store.state.todo.rounds_since_update += 1;
-                    }
-                    if store.state.todo.rounds_since_update >= tuning().nag_threshold
-                        && !store.state.todo.items.is_empty()
-                    {
-                        if let Some(last) =
-                            store.context.history.last_mut()
-                        {
-                            if last.role == Role::Tool {
-                                if let Some(content) = &mut last.content {
-                                    content.push_str(
-                                        "\n\n<reminder>Update your \
-                                         todos.</reminder>",
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
+        let Some(tool_calls) = response.tool_calls else {
+            if opts.flush_on_done {
+                channel.flush().await;
             }
-            None => {
-                if opts.flush_on_done {
-                    channel.flush().await;
-                }
-                break;
-            }
+            break;
+        };
+
+        if handle_tool_calls(&tool_calls, store, channel, opts.nag_reminder).await? {
+            break;
         }
     }
 
     Ok(last_total_tokens)
 }
 
+async fn should_interrupt(opts: &CotOptions, channel: &Arc<dyn Channel>) -> bool {
+    if let Some(flag) = &opts.interrupted
+        && flag.swap(false, Ordering::Relaxed)
+    {
+        channel.send("[interrupted]").await;
+        return true;
+    }
+    false
+}
+
+fn reached_turn_limit(turns: usize, opts: &CotOptions) -> bool {
+    opts.max_turns.is_some_and(|max| turns >= max)
+}
+
+fn inject_runtime_updates(store: &mut SharedStore) {
+    inject_background_results(store);
+    inject_team_inbox(store);
+}
+
+fn inject_background_results(store: &mut SharedStore) {
+    let notifications = store.state.background.drain_notifications();
+    if notifications.is_empty() {
+        return;
+    }
+
+    let notif_text = notifications
+        .iter()
+        .map(|(id, result)| format!("[bg:{id}] {result}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    push_runtime_exchange(
+        store,
+        format!(
+            "<background-results>\n\
+             {notif_text}\n\
+             </background-results>"
+        ),
+        BACKGROUND_RESULTS_ACK,
+    );
+}
+
+fn inject_team_inbox(store: &mut SharedStore) {
+    let Some(team) = &store.state.team else {
+        return;
+    };
+
+    let name = store.state.sender_name();
+    let messages = team.bus().read_inbox(name);
+    if messages.is_empty() {
+        return;
+    }
+
+    let inbox_json = serde_json::to_string(&messages).unwrap_or_default();
+    push_runtime_exchange(
+        store,
+        format!("<inbox>\n{inbox_json}\n</inbox>"),
+        INBOX_RESULTS_ACK,
+    );
+}
+
+fn push_runtime_exchange(store: &mut SharedStore, user_content: String, assistant_ack: &str) {
+    store.context.history.push(Message {
+        role: Role::User,
+        content: Some(user_content),
+        tool_calls: None,
+        tool_call_id: None,
+    });
+    store.context.history.push(Message {
+        role: Role::Assistant,
+        content: Some(assistant_ack.into()),
+        tool_calls: None,
+        tool_call_id: None,
+    });
+}
+
+async fn handle_tool_calls(
+    tool_calls: &[ResponseToolCall],
+    store: &mut SharedStore,
+    channel: &Arc<dyn Channel>,
+    nag_reminder: bool,
+) -> Result<bool> {
+    let mut had_todo = false;
+    for tool_call in tool_calls {
+        had_todo |= tool_call.name == "todo";
+        let handled = dispatch_tool(
+            &tool_call.name,
+            tool_call.id.clone(),
+            &tool_call.arguments,
+            store,
+            channel,
+        )
+        .await?;
+
+        if !handled {
+            push_unknown_tool_result(store, &tool_call.id, &tool_call.name);
+        }
+    }
+
+    if store.state.idle_requested {
+        store.state.idle_requested = false;
+        return Ok(true);
+    }
+
+    if nag_reminder {
+        update_todo_reminder(store, had_todo);
+    }
+
+    Ok(false)
+}
+
+fn push_unknown_tool_result(store: &mut SharedStore, call_id: &str, tool_name: &str) {
+    store.context.history.push(Message {
+        role: Role::Tool,
+        content: Some(format!("Unknown tool: {tool_name}")),
+        tool_calls: None,
+        tool_call_id: Some(call_id.to_string()),
+    });
+}
+
+fn update_todo_reminder(store: &mut SharedStore, had_todo_update: bool) {
+    store.state.todo.record_round(had_todo_update);
+    if store.state.todo.should_nag(tuning().agent.nag_threshold) {
+        let _ = append_reminder(&mut store.context.history, TODO_REMINDER);
+    }
+}
+
 /// Run an agent with isolated context
 ///
-/// Creates a fresh message history, runs a CoT loop up to `max_subagent_turns`,
+/// Creates a fresh message history, runs a `CoT` loop up to `max_subagent_turns`,
 /// and returns only the final assistant text. The agent's full history
 /// is discarded — the caller sees just the summary.
 ///
@@ -207,33 +226,41 @@ pub async fn cot_loop(
 ///
 /// # Arguments
 ///
-/// * `prompt` - The task description
-/// * `system_prompt` - Agent identity (from AGENT.md)
-/// * `llm_config` - LLM configuration cloned from the parent
-/// * `workspace_dir` - Agent workspace for Intelligence loading
-/// * `agent_id` - Agent identifier for runtime context
-/// * `agents` - Shared agent registry (passed through for nested dispatch)
-/// * `tasks` - Shared task graph (passed through for task operations)
+/// * `spec` - Subagent execution configuration
 ///
 /// # Returns
 ///
 /// The last assistant message text, or `"(no summary)"` if none.
-pub fn run_subagent(
-    prompt: String,
-    system_prompt: String,
-    llm_config: LLMConfig,
-    workspace_dir: Option<PathBuf>,
-    agent_id: String,
-    agents: SharedAgents,
-    tasks: Option<TaskManager>,
-    denied_tools: Vec<String>,
-) -> Pin<Box<dyn Future<Output = Result<String>> + Send>> {
+pub struct SubagentSpec {
+    pub prompt: String,
+    pub system_prompt: String,
+    pub llm_config: LLMConfig,
+    pub workspace_dir: Option<PathBuf>,
+    pub agent_id: String,
+    pub agents: SharedAgents,
+    pub tasks: Option<TaskManager>,
+    pub denied_tools: Vec<String>,
+}
+
+#[must_use]
+pub fn run_subagent(spec: SubagentSpec) -> Pin<Box<dyn Future<Output = Result<String>> + Send>> {
     Box::pin(async move {
+        let SubagentSpec {
+            prompt,
+            system_prompt,
+            llm_config,
+            workspace_dir,
+            agent_id,
+            agents,
+            tasks,
+            denied_tools,
+        } = spec;
+
         // Build Intelligence from workspace if available
         let intelligence = workspace_dir.as_ref().map(|ws| {
             Intelligence::new(
                 ws,
-                system_prompt.clone(),
+                &system_prompt,
                 agent_id.clone(),
                 "task".into(),
                 llm_config.model.clone(),
@@ -241,7 +268,7 @@ pub fn run_subagent(
         });
         let effective_prompt = intelligence
             .as_ref()
-            .map(|i| i.build_prompt())
+            .map(Intelligence::build_prompt)
             .unwrap_or(system_prompt);
 
         let mut store = SharedStore {
@@ -281,7 +308,7 @@ pub fn run_subagent(
             &channel,
             &http,
             &CotOptions {
-                max_turns: Some(tuning().max_subagent_turns),
+                max_turns: Some(tuning().agent.max_subagent_turns),
                 nag_reminder: false,
                 flush_on_done: false,
                 interrupted: None,
@@ -289,28 +316,29 @@ pub fn run_subagent(
         )
         .await?;
 
-        // Extract last assistant text as summary
-        let summary = store
-            .context
-            .history
-            .iter()
-            .rev()
-            .find(|m| m.role == Role::Assistant && m.content.is_some())
-            .and_then(|m| m.content.clone())
-            .unwrap_or_else(|| "(no summary)".into());
-
-        Ok(summary)
+        Ok(extract_last_assistant_summary(&store))
     })
+}
+
+fn extract_last_assistant_summary(store: &SharedStore) -> String {
+    store
+        .context
+        .history
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::Assistant && message.content.is_some())
+        .and_then(|message| message.content.clone())
+        .unwrap_or_else(|| "(no summary)".into())
 }
 
 /// Chain-of-thought agent
 ///
 /// Drives the LLM loop: call LLM → dispatch tool calls → repeat until done.
-/// Does not own SharedStore or Channel — receives both per call.
+/// Does not own `SharedStore` or `Channel` — receives both per call.
 pub struct Agent;
 
 impl Agent {
-    /// Run the CoT loop against the given store
+    /// Run the `CoT` loop against the given store
     ///
     /// # Arguments
     ///

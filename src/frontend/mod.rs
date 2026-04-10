@@ -1,6 +1,20 @@
+//! User-facing frontends.
+//!
+//! Each frontend turns external input (terminal keystrokes, Discord messages,
+//! WebSocket frames) into a [`UserMessage`] and feeds it through the routing
+//! and session layers via the [`Channel`] trait.
+//!
+//! - [`cli`] — Ratatui terminal TUI.
+//! - [`discord`] — Discord gateway client.
+//! - [`gateway`] — JSON-RPC 2.0 WebSocket gateway with managed services.
+//! - [`repl`] — Readline-style REPL backed by the same router.
+//! - [`stdio`] — Line-oriented JSON-over-stdio protocol channel.
+//! - [`utils`] — Shared text helpers used by frontends.
+
 pub mod cli;
 pub mod discord;
 pub mod gateway;
+pub(crate) mod launch;
 pub mod repl;
 pub mod stdio;
 pub mod utils;
@@ -33,11 +47,7 @@ pub trait Channel: Send + Sync {
     ///
     /// Default delegates to `confirm()`. Protocol-aware channels
     /// override this to send structured `ToolRequest` events.
-    async fn can_use_tool(
-        &self,
-        tool: &str,
-        args: &serde_json::Value,
-    ) -> bool {
+    async fn can_use_tool(&self, tool: &str, args: &serde_json::Value) -> bool {
         self.confirm(&format!("{tool}: {args}")).await
     }
 

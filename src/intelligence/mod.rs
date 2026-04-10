@@ -1,3 +1,25 @@
+//! Dynamic system-prompt assembly and per-agent intelligence.
+//!
+//! This module assembles the seven layers of an agent's system prompt at
+//! every turn:
+//!
+//! 1. Identity (from `AGENTS.md` frontmatter)
+//! 2. Tools (built dynamically from the registered tool set)
+//! 3. Skills (loaded on demand via `/<skill>` commands)
+//! 4. Memory (persisted across conversations)
+//! 5. Bootstrap (markdown files like `AGENTS.md`, `TOOLS.md`)
+//! 6. Runtime (current time, working directory, …)
+//! 7. Channel (frontend-specific affordances)
+//!
+//! ## Submodules
+//!
+//! - [`bootstrap`] — Loads markdown bootstrap files (`AGENTS.md`, `TOOLS.md`, …).
+//! - [`manager`] — `AgentManager`, `AgentConfig`, workspace discovery.
+//! - [`memory`] — Persistent per-agent memory store.
+//! - [`prompt`] — Prompt assembly itself (`Intelligence::build_prompt`).
+//! - [`skills`] — On-demand `SKILL.md` loading.
+//! - [`utils`] — Frontmatter parsing and small file helpers.
+
 pub mod bootstrap;
 pub mod manager;
 pub mod memory;
@@ -33,6 +55,12 @@ use crate::intelligence::bootstrap::BootstrapLoader;
 use crate::intelligence::memory::MemoryStore;
 use crate::intelligence::skills::{Skill, SkillsManager};
 
+struct IntelligenceResources {
+    bootstrap_data: std::collections::HashMap<String, String>,
+    skills: Vec<Skill>,
+    memory: MemoryStore,
+}
+
 /// Intelligence context for dynamic system prompt assembly
 ///
 /// Static layers (identity, tools, skills, bootstrap, channel) are cached at
@@ -61,34 +89,26 @@ impl Intelligence {
     /// * `agent_id` - Agent identifier for runtime context
     /// * `channel` - Channel type (cli, discord, etc.)
     /// * `model` - Model name for runtime context
+    #[must_use]
     pub fn new(
         workspace_dir: &Path,
-        identity: String,
+        identity: &str,
         agent_id: String,
         channel: String,
         model: String,
     ) -> Self {
-        let loader = BootstrapLoader::new(workspace_dir);
-        let bootstrap_data = loader.load_all(PromptMode::Full);
-
-        let mut skills_mgr = SkillsManager::new(workspace_dir);
-        skills_mgr.discover(&[]);
-
-        let mut memory = MemoryStore::new(&workspace_dir.join("memory"));
-        memory.discover();
-
         let mode = PromptMode::Full;
-        let static_prefix = prompt::build_static_prefix(
-            mode,
-            &identity,
-            &bootstrap_data,
-            &skills_mgr.skills,
-            &channel,
-        );
+        let IntelligenceResources {
+            bootstrap_data,
+            skills,
+            memory,
+        } = load_intelligence_resources(workspace_dir, mode);
+        let static_prefix =
+            prompt::build_static_prefix(mode, identity, &bootstrap_data, &skills, &channel);
 
         Self {
             memory,
-            skills: skills_mgr.skills,
+            skills,
             agent_id,
             channel,
             model,
@@ -98,11 +118,13 @@ impl Intelligence {
     }
 
     /// Find a skill by name (e.g. "greet")
+    #[must_use]
     pub fn find_skill(&self, name: &str) -> Option<&Skill> {
         self.skills.iter().find(|s| s.name == name)
     }
 
     /// Build the system prompt: cached static prefix + fresh dynamic suffix
+    #[must_use]
     pub fn build_prompt(&self) -> String {
         let dynamic = prompt::build_dynamic_suffix(
             self.mode,
@@ -112,6 +134,23 @@ impl Intelligence {
             &self.channel,
         );
         prompt::join_prompt(&self.static_prefix, &dynamic)
+    }
+}
+
+fn load_intelligence_resources(workspace_dir: &Path, mode: PromptMode) -> IntelligenceResources {
+    let loader = BootstrapLoader::new(workspace_dir);
+    let bootstrap_data = loader.load_all(mode);
+
+    let mut skills_mgr = SkillsManager::new(workspace_dir);
+    skills_mgr.discover(&[]);
+
+    let mut memory = MemoryStore::new(&workspace_dir.join("memory"));
+    memory.discover();
+
+    IntelligenceResources {
+        bootstrap_data,
+        skills: skills_mgr.skills,
+        memory,
     }
 }
 
@@ -128,16 +167,14 @@ mod tests {
         }
 
         // Read AGENT.md as identity (plain markdown, no frontmatter)
-        let identity = std::fs::read_to_string(
-            workspace.join("AGENT.md"),
-        )
-        .unwrap()
-        .trim()
-        .to_string();
+        let identity = std::fs::read_to_string(workspace.join("AGENT.md"))
+            .unwrap()
+            .trim()
+            .to_string();
 
         let intel = Intelligence::new(
             workspace,
-            identity,
+            &identity,
             "mandeven".into(),
             "cli".into(),
             "test-model".into(),

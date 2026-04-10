@@ -3,14 +3,19 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 
 use crate::config;
-use crate::frontend::gateway::Gateway;
+use crate::frontend::gateway::{Gateway, ManagedService, ServiceCommand, ServiceStatus};
 use crate::frontend::{Channel, UserMessage, cli};
 use crate::routing::router::Router;
 
 // ── CLI command definitions ────────────────────────────────
 
 #[derive(Parser)]
-#[command(name = "/", no_binary_name = true, disable_help_flag = true, disable_help_subcommand = true)]
+#[command(
+    name = "/",
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_help_subcommand = true
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -59,12 +64,20 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<DeliveryAction>,
     },
+    /// Show runtime service status
+    Services,
 
     // ── Gateways ──
-    /// Start Discord bot
-    Discord,
-    /// Start WebSocket gateway
-    Gateway,
+    /// Manage Discord bot runtime
+    Discord {
+        #[command(subcommand)]
+        action: Option<FrontendAction>,
+    },
+    /// Manage WebSocket gateway runtime
+    Gateway {
+        #[command(subcommand)]
+        action: Option<FrontendAction>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -79,8 +92,12 @@ enum LlmAction {
 
 #[derive(Subcommand)]
 enum CronAction {
+    /// Start the cron service
+    Start,
     /// Stop the cron service
     Stop,
+    /// Restart the cron service
+    Restart,
     /// Reload CRON.json
     Reload,
     /// Manually trigger a cron job
@@ -89,8 +106,22 @@ enum CronAction {
 
 #[derive(Subcommand)]
 enum DeliveryAction {
+    /// Start the delivery runner
+    Start,
     /// Stop the delivery runner
     Stop,
+    /// Restart the delivery runner
+    Restart,
+}
+
+#[derive(Subcommand)]
+enum FrontendAction {
+    /// Start the service
+    Start,
+    /// Stop the service
+    Stop,
+    /// Restart the service
+    Restart,
 }
 
 // ── REPL ───────────────────────────────────────────────────
@@ -131,47 +162,56 @@ fn parse_cmd(input: &str) -> Option<Result<Cmd, String>> {
 /// through the gateway. Session-level commands (`/new`, `/save`,
 /// `/compact`, `/prompt`, etc.) pass through to the session.
 pub async fn run(gateway: Arc<Gateway>, cli: Arc<dyn Channel>) {
-    let mut discord_started = false;
-    let mut ws_started = false;
-    let mut agent_override: Option<String> = None;
+    let mut state = ReplState::default();
 
     loop {
-        let msg = match cli.receive().await {
-            Some(msg) => msg,
-            None => continue,
+        let Some(msg) = cli.receive().await else {
+            continue;
         };
 
         match parse_cmd(&msg.text) {
-            // Not a repl command → pass through to gateway/session
             None => {
-                match gateway
-                    .dispatch(msg, cli.clone(), agent_override.as_deref())
-                    .await
-                {
-                    Ok(result) => { let _ = result.done.await; }
-                    Err(e) => { cli.send(&format!("Error: {e}")).await; }
-                }
-                continue;
+                handle_session_passthrough(&gateway, &cli, &state, msg).await;
             }
-            // Parse error from clap
             Some(Err(e)) => {
                 cli.send(&e).await;
-                continue;
             }
             Some(Ok(cmd)) => {
-                dispatch(cmd, &gateway, &cli, &mut agent_override, &mut discord_started, &mut ws_started).await;
+                dispatch_command(cmd, &gateway, &cli, &mut state).await;
             }
         }
     }
 }
 
-async fn dispatch(
+#[derive(Default)]
+struct ReplState {
+    agent_override: Option<String>,
+}
+
+async fn handle_session_passthrough(
+    gateway: &Arc<Gateway>,
+    cli: &Arc<dyn Channel>,
+    state: &ReplState,
+    msg: UserMessage,
+) {
+    match gateway
+        .dispatch(msg, cli.clone(), state.agent_override.as_deref())
+        .await
+    {
+        Ok(result) => {
+            let _ = result.done.await;
+        }
+        Err(e) => {
+            cli.send(&format!("Error: {e}")).await;
+        }
+    }
+}
+
+async fn dispatch_command(
     cmd: Cmd,
     gateway: &Arc<Gateway>,
     cli: &Arc<dyn Channel>,
-    agent_override: &mut Option<String>,
-    discord_started: &mut bool,
-    ws_started: &mut bool,
+    state: &mut ReplState,
 ) {
     match cmd {
         Cmd::Exit => {
@@ -183,81 +223,113 @@ async fn dispatch(
             cli.send(HELP_TEXT).await;
         }
 
-        // ── LLM ──
-
-        Cmd::Llm { action: None } => {
-            match config::list_llm_profiles() {
-                Ok(profiles) if profiles.is_empty() => {
-                    cli.send("No LLM profiles.").await;
-                }
-                Ok(profiles) => {
-                    let mut lines = vec![format!("LLM Profiles ({}):", profiles.len())];
-                    for (i, p) in profiles.iter().enumerate() {
-                        let tag = if i == 0 { " ← primary" } else { "" };
-                        lines.push(format!(
-                            "  {} │ {} │ ctx={}k{}",
-                            p.model, p.base_url.trim_end_matches('/'),
-                            p.context_window / 1000, tag,
-                        ));
-                    }
-                    cli.send(&lines.join("\n")).await;
-                }
-                Err(e) => cli.send(&format!("Error: {e}")).await,
-            }
+        Cmd::Llm { action } => handle_llm_command(action, cli).await,
+        Cmd::Agents | Cmd::Switch { .. } | Cmd::Bindings | Cmd::Route { .. } => {
+            handle_routing_command(cmd, gateway, cli, state).await;
         }
-
-        Cmd::Llm { action: Some(LlmAction::Add) } => {
-            cli.send("model name:").await;
-            let model = match cli.receive().await {
-                Some(m) if !m.text.trim().is_empty() => m.text.trim().to_string(),
-                _ => { cli.send("Cancelled.").await; return; }
-            };
-            cli.send("base_url:").await;
-            let base_url = match cli.receive().await {
-                Some(m) if !m.text.trim().is_empty() => m.text.trim().to_string(),
-                _ => { cli.send("Cancelled.").await; return; }
-            };
-            cli.send("api_key (or $ENV_VAR):").await;
-            let api_key = match cli.receive().await {
-                Some(m) if !m.text.trim().is_empty() => m.text.trim().to_string(),
-                _ => { cli.send("Cancelled.").await; return; }
-            };
-            cli.send("context_window:").await;
-            let context_window = match cli.receive().await {
-                Some(m) => match m.text.trim().parse::<usize>() {
-                    Ok(n) => n,
-                    Err(_) => { cli.send("Invalid number. Cancelled.").await; return; }
-                },
-                None => { cli.send("Cancelled.").await; return; }
-            };
-            let entry = config::LLMConfig {
-                model: model.clone(),
-                base_url,
-                api_key,
-                context_window,
-            };
-            match config::add_llm(&entry) {
-                Ok(()) => cli.send(&format!("Added: {model}")).await,
-                Err(e) => cli.send(&format!("Error: {e}")).await,
-            }
+        Cmd::Cron { action } => handle_cron_command(action, gateway, cli).await,
+        Cmd::Delivery { action } => handle_delivery_command(action, gateway, cli).await,
+        Cmd::Services => handle_services_command(gateway, cli).await,
+        Cmd::Discord { .. } | Cmd::Gateway { .. } => {
+            handle_gateway_command(cmd, gateway, cli).await;
         }
+    }
+}
 
-        Cmd::Llm { action: Some(LlmAction::Rm { model }) } => {
-            match config::remove_llm(&model) {
-                Ok(()) => cli.send(&format!("Removed: {model}")).await,
-                Err(e) => cli.send(&format!("Error: {e}")).await,
+async fn handle_llm_command(action: Option<LlmAction>, cli: &Arc<dyn Channel>) {
+    match action {
+        None => show_llm_profiles(cli).await,
+        Some(LlmAction::Add) => add_llm_profile(cli).await,
+        Some(LlmAction::Rm { model }) => match config::remove_llm(&model) {
+            Ok(()) => cli.send(&format!("Removed: {model}")).await,
+            Err(e) => cli.send(&format!("Error: {e}")).await,
+        },
+        Some(LlmAction::Primary { model }) => match config::set_primary_llm(&model) {
+            Ok(()) => cli.send(&format!("Primary set to: {model}")).await,
+            Err(e) => cli.send(&format!("Error: {e}")).await,
+        },
+    }
+}
+
+async fn show_llm_profiles(cli: &Arc<dyn Channel>) {
+    match config::list_llm_profiles() {
+        Ok(profiles) if profiles.is_empty() => cli.send("No LLM profiles.").await,
+        Ok(profiles) => {
+            let mut lines = vec![format!("LLM Profiles ({}):", profiles.len())];
+            for (i, profile) in profiles.iter().enumerate() {
+                let tag = if i == 0 { " ← primary" } else { "" };
+                lines.push(format!(
+                    "  {} │ {} │ ctx={}k{}",
+                    profile.model,
+                    profile.base_url.trim_end_matches('/'),
+                    profile.context_window / 1000,
+                    tag,
+                ));
             }
+            cli.send(&lines.join("\n")).await;
         }
+        Err(e) => cli.send(&format!("Error: {e}")).await,
+    }
+}
 
-        Cmd::Llm { action: Some(LlmAction::Primary { model }) } => {
-            match config::set_primary_llm(&model) {
-                Ok(()) => cli.send(&format!("Primary set to: {model}")).await,
-                Err(e) => cli.send(&format!("Error: {e}")).await,
-            }
-        }
+async fn add_llm_profile(cli: &Arc<dyn Channel>) {
+    let Some(model) = prompt_required(cli, "model name:").await else {
+        cli.send("Cancelled.").await;
+        return;
+    };
+    let Some(base_url) = prompt_required(cli, "base_url:").await else {
+        cli.send("Cancelled.").await;
+        return;
+    };
+    let Some(api_key) = prompt_required(cli, "api_key (or $ENV_VAR):").await else {
+        cli.send("Cancelled.").await;
+        return;
+    };
+    let Some(context_window) = prompt_usize(cli, "context_window:").await else {
+        return;
+    };
 
-        // ── Agents & Routing ──
+    let entry = config::LLMConfig {
+        model: model.clone(),
+        base_url,
+        api_key,
+        context_window,
+    };
+    match config::add_llm(&entry) {
+        Ok(()) => cli.send(&format!("Added: {model}")).await,
+        Err(e) => cli.send(&format!("Error: {e}")).await,
+    }
+}
 
+async fn prompt_required(cli: &Arc<dyn Channel>, prompt: &str) -> Option<String> {
+    cli.send(prompt).await;
+    let msg = cli.receive().await?;
+    let text = msg.text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+async fn prompt_usize(cli: &Arc<dyn Channel>, prompt: &str) -> Option<usize> {
+    cli.send(prompt).await;
+    let Some(message) = cli.receive().await else {
+        cli.send("Cancelled.").await;
+        return None;
+    };
+
+    if let Ok(value) = message.text.trim().parse::<usize>() {
+        Some(value)
+    } else {
+        cli.send("Invalid number. Cancelled.").await;
+        None
+    }
+}
+
+async fn handle_routing_command(
+    cmd: Cmd,
+    gateway: &Arc<Gateway>,
+    cli: &Arc<dyn Channel>,
+    state: &mut ReplState,
+) {
+    match cmd {
         Cmd::Agents => {
             let text = {
                 let s = gateway.state().read().await;
@@ -266,46 +338,25 @@ async fn dispatch(
                     "No agents registered.".to_string()
                 } else {
                     let mut lines = vec!["Registered agents:".to_string()];
-                    for a in &agents {
-                        let ws = if a.workspace_dir.is_empty() {
+                    for agent in &agents {
+                        let workspace = if agent.workspace_dir.is_empty() {
                             "(default)"
                         } else {
-                            &a.workspace_dir
+                            &agent.workspace_dir
                         };
-                        let active = if agent_override.as_deref() == Some(&*a.id) {
+                        let active = if state.agent_override.as_deref() == Some(&agent.id) {
                             " ← active"
                         } else {
                             ""
                         };
-                        lines.push(format!("  {} — workspace: {ws}{active}", a.id));
+                        lines.push(format!("  {} — workspace: {workspace}{active}", agent.id));
                     }
                     lines.join("\n")
                 }
             };
             cli.send(&text).await;
         }
-
-        Cmd::Switch { agent: None } => {
-            let current = agent_override.as_deref().unwrap_or("(default routing)");
-            cli.send(&format!("Current agent: {current}")).await;
-        }
-
-        Cmd::Switch { agent: Some(ref name) } if name == "off" => {
-            *agent_override = None;
-            cli.send("Switched to default routing.").await;
-        }
-
-        Cmd::Switch { agent: Some(name) } => {
-            let found = gateway.state().read().await
-                .router.shared_agents().get(&name).is_some();
-            if found {
-                cli.send(&format!("Switched to agent: {name}")).await;
-                *agent_override = Some(name);
-            } else {
-                cli.send(&format!("Agent '{name}' not found. Use /agents to list.")).await;
-            }
-        }
-
+        Cmd::Switch { agent } => handle_switch_command(agent, gateway, cli, state).await,
         Cmd::Bindings => {
             let text = {
                 let s = gateway.state().read().await;
@@ -314,10 +365,10 @@ async fn dispatch(
                     "No bindings.".to_string()
                 } else {
                     let mut lines = vec![format!("Route Bindings ({}):", bindings.len())];
-                    for b in bindings {
+                    for binding in bindings {
                         lines.push(format!(
                             "  T{} {} = {} → {}",
-                            b.tier, b.match_key, b.match_value, b.agent_id,
+                            binding.tier, binding.match_key, binding.match_value, binding.agent_id,
                         ));
                     }
                     lines.join("\n")
@@ -325,8 +376,12 @@ async fn dispatch(
             };
             cli.send(&text).await;
         }
-
-        Cmd::Route { channel, peer_id, account_id, guild_id } => {
+        Cmd::Route {
+            channel,
+            peer_id,
+            account_id,
+            guild_id,
+        } => {
             let test_msg = UserMessage {
                 text: String::new(),
                 channel,
@@ -338,7 +393,7 @@ async fn dispatch(
                 let s = gateway.state().read().await;
                 let result = s.router.resolve(&test_msg);
                 let agent = s.router.shared_agents().get(&result.agent_id);
-                let name = agent.as_ref().map(|a| a.name.as_str()).unwrap_or("?");
+                let name = agent.as_ref().map_or("?", |entry| entry.name.as_str());
                 format!(
                     "Route Resolution:\n  Agent:   {} ({})\n  Session: {}",
                     result.agent_id, name, result.session_key,
@@ -346,111 +401,222 @@ async fn dispatch(
             };
             cli.send(&text).await;
         }
+        _ => {}
+    }
+}
 
-        // ── Scheduler ──
+async fn handle_switch_command(
+    agent: Option<String>,
+    gateway: &Arc<Gateway>,
+    cli: &Arc<dyn Channel>,
+    state: &mut ReplState,
+) {
+    match agent {
+        None => {
+            let current = state
+                .agent_override
+                .as_deref()
+                .unwrap_or("(default routing)");
+            cli.send(&format!("Current agent: {current}")).await;
+        }
+        Some(name) if name == "off" => {
+            state.agent_override = None;
+            cli.send("Switched to default routing.").await;
+        }
+        Some(name) => {
+            let found = gateway
+                .state()
+                .read()
+                .await
+                .router
+                .shared_agents()
+                .get(&name)
+                .is_some();
+            if found {
+                cli.send(&format!("Switched to agent: {name}")).await;
+                state.agent_override = Some(name);
+            } else {
+                cli.send(&format!("Agent '{name}' not found. Use /agents to list."))
+                    .await;
+            }
+        }
+    }
+}
 
-        Cmd::Cron { action: None } => {
+async fn handle_cron_command(
+    action: Option<CronAction>,
+    gateway: &Arc<Gateway>,
+    cli: &Arc<dyn Channel>,
+) {
+    match action {
+        None => {
             let jobs = gateway.cron_list_jobs().await;
             if jobs.is_empty() {
                 cli.send("No cron jobs.").await;
             } else {
                 let mut lines = vec![format!("Cron Jobs ({}):", jobs.len())];
-                for j in &jobs {
-                    let en = if j.enabled { "on" } else { "OFF" };
+                for job in &jobs {
+                    let enabled = if job.enabled { "on" } else { "OFF" };
                     lines.push(format!(
-                        "  {} ({}) [{en}] kind={} errors={} last={} next={}",
-                        j.name, j.id, j.kind, j.errors, j.last_run, j.next_run,
+                        "  {} ({}) [{enabled}] kind={} errors={} last={} next={}",
+                        job.name, job.id, job.kind, job.errors, job.last_run, job.next_run,
                     ));
                 }
                 cli.send(&lines.join("\n")).await;
             }
         }
-
-        Cmd::Cron { action: Some(CronAction::Stop) } => {
-            if let Some(h) = gateway.cron_handle().await {
-                h.stop();
-                cli.send("Cron service stopped.").await;
-            } else {
-                cli.send("Cron service not running.").await;
-            }
+        Some(CronAction::Stop) => {
+            cli.send(
+                &gateway
+                    .services()
+                    .control(gateway, ManagedService::Cron, ServiceCommand::Stop)
+                    .await
+                    .to_string(),
+            )
+            .await;
         }
-
-        Cmd::Cron { action: Some(CronAction::Reload) } => {
-            if let Some(h) = gateway.cron_handle().await {
-                let result = h.reload().await;
-                cli.send(&result).await;
-            } else {
-                cli.send("Cron service not running.").await;
-            }
+        Some(CronAction::Start) => {
+            cli.send(
+                &gateway
+                    .services()
+                    .control(gateway, ManagedService::Cron, ServiceCommand::Start)
+                    .await
+                    .to_string(),
+            )
+            .await;
         }
-
-        Cmd::Cron { action: Some(CronAction::Trigger { id }) } => {
-            if let Some(h) = gateway.cron_handle().await {
-                let result = h.trigger_job(&id).await;
-                cli.send(&result).await;
-            } else {
-                cli.send("Cron service not running.").await;
-            }
+        Some(CronAction::Restart) => {
+            cli.send(
+                &gateway
+                    .services()
+                    .control(gateway, ManagedService::Cron, ServiceCommand::Restart)
+                    .await
+                    .to_string(),
+            )
+            .await;
         }
+        Some(CronAction::Reload) => {
+            cli.send(
+                &gateway
+                    .services()
+                    .control(gateway, ManagedService::Cron, ServiceCommand::Reload)
+                    .await
+                    .to_string(),
+            )
+            .await;
+        }
+        Some(CronAction::Trigger { id }) => {
+            with_cron_handle(gateway, cli, |handle| async move {
+                handle.trigger_job(&id).await
+            })
+            .await;
+        }
+    }
+}
 
-        Cmd::Delivery { action: None } => {
-            if let Some(st) = gateway.delivery().stats().await {
+async fn handle_services_command(gateway: &Arc<Gateway>, cli: &Arc<dyn Channel>) {
+    let statuses = gateway.services().status_snapshot(gateway).await;
+    cli.send(&render_service_statuses(&statuses)).await;
+}
+
+async fn with_cron_handle<F, Fut>(gateway: &Arc<Gateway>, cli: &Arc<dyn Channel>, f: F)
+where
+    F: FnOnce(crate::scheduler::cron::CronHandle) -> Fut,
+    Fut: std::future::Future<Output = String>,
+{
+    if let Some(handle) = gateway.cron_handle() {
+        let result = f(handle).await;
+        cli.send(&result).await;
+    } else {
+        cli.send("Cron service not running.").await;
+    }
+}
+
+async fn handle_delivery_command(
+    action: Option<DeliveryAction>,
+    gateway: &Arc<Gateway>,
+    cli: &Arc<dyn Channel>,
+) {
+    match action {
+        None => {
+            if let Some(stats) = gateway.delivery().stats().await {
                 cli.send(&format!(
                     "Delivery Queue:\n  attempted={}  succeeded={}  failed={}  pending={}",
-                    st.total_attempted, st.total_succeeded, st.total_failed, st.pending,
-                )).await;
+                    stats.total_attempted, stats.total_succeeded, stats.total_failed, stats.pending,
+                ))
+                .await;
             } else {
                 cli.send("Delivery runner not available.").await;
             }
         }
-
-        Cmd::Delivery { action: Some(DeliveryAction::Stop) } => {
-            gateway.delivery().stop();
-            cli.send("Delivery runner stopped.").await;
+        Some(DeliveryAction::Stop) => {
+            cli.send(
+                &gateway
+                    .services()
+                    .control(gateway, ManagedService::Delivery, ServiceCommand::Stop)
+                    .await
+                    .to_string(),
+            )
+            .await;
         }
-
-        // ── Gateways ──
-
-        Cmd::Discord => {
-            if *discord_started {
-                cli.send("Discord gateway already running").await;
-                return;
-            }
-            match &gateway.config().discord_token {
-                Some(token) => {
-                    let token = token.clone();
-                    let gw = gateway.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) =
-                            crate::frontend::discord::start_gateway(token, gw).await
-                        {
-                            log::error!("Discord gateway error: {e}");
-                        }
-                    });
-                    *discord_started = true;
-                    cli.send("Discord gateway started").await;
-                }
-                _ => cli.send("DISCORD_BOT_TOKEN not set").await,
-            }
+        Some(DeliveryAction::Start) => {
+            cli.send(
+                &gateway
+                    .services()
+                    .control(gateway, ManagedService::Delivery, ServiceCommand::Start)
+                    .await
+                    .to_string(),
+            )
+            .await;
         }
-
-        Cmd::Gateway => {
-            if *ws_started {
-                cli.send("WebSocket gateway already running").await;
-                return;
-            }
-            let gw = gateway.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    crate::frontend::gateway::start_ws(gw, "localhost", 8765).await
-                {
-                    log::error!("WebSocket gateway error: {e}");
-                }
-            });
-            *ws_started = true;
-            cli.send("WebSocket gateway started on ws://localhost:8765").await;
+        Some(DeliveryAction::Restart) => {
+            cli.send(
+                &gateway
+                    .services()
+                    .control(gateway, ManagedService::Delivery, ServiceCommand::Restart)
+                    .await
+                    .to_string(),
+            )
+            .await;
         }
     }
+}
+
+async fn handle_gateway_command(cmd: Cmd, gateway: &Arc<Gateway>, cli: &Arc<dyn Channel>) {
+    let (service, command) = match cmd {
+        Cmd::Discord { action } => (ManagedService::Discord, map_frontend_action(action)),
+        Cmd::Gateway { action } => (ManagedService::Websocket, map_frontend_action(action)),
+        _ => return,
+    };
+    cli.send(
+        &gateway
+            .services()
+            .control(gateway, service, command)
+            .await
+            .to_string(),
+    )
+    .await;
+}
+
+fn map_frontend_action(action: Option<FrontendAction>) -> ServiceCommand {
+    match action.unwrap_or(FrontendAction::Start) {
+        FrontendAction::Start => ServiceCommand::Start,
+        FrontendAction::Stop => ServiceCommand::Stop,
+        FrontendAction::Restart => ServiceCommand::Restart,
+    }
+}
+
+fn render_service_statuses(statuses: &[ServiceStatus]) -> String {
+    let mut lines = vec!["Runtime Services:".to_string()];
+    for status in statuses {
+        let marker = if status.running { "on " } else { "OFF" };
+        lines.push(format!(
+            "  {:9} [{marker}] {}",
+            status.service.label(),
+            status.summary
+        ));
+    }
+    lines.join("\n")
 }
 
 const HELP_TEXT: &str = "\
@@ -494,14 +660,23 @@ Scheduler
   /heartbeat              Heartbeat status
   /trigger                Manual heartbeat
   /cron                   List cron jobs
+  /cron start             Start cron service
   /cron stop              Stop cron service
+  /cron restart           Restart cron service
   /cron trigger <id>      Trigger a cron job
   /cron reload            Reload CRON.json
   /delivery               Delivery queue stats
+  /delivery start         Start delivery runner
   /delivery stop          Stop delivery runner
+  /delivery restart       Restart delivery runner
+  /services               Runtime service status
 
 Gateways
-  /discord                Discord bot
-  /gateway                WebSocket API
+  /discord [start]        Start Discord bot
+  /discord stop           Stop Discord bot
+  /discord restart        Restart Discord bot
+  /gateway [start]        Start WebSocket API
+  /gateway stop           Stop WebSocket API
+  /gateway restart        Restart WebSocket API
 
 /help  /exit";

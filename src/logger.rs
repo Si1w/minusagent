@@ -32,14 +32,18 @@ pub struct TuiLogger;
 impl TuiLogger {
     /// Initialize the global logger
     ///
-    /// Priority: `RUST_LOG` env var > `tuning.log_level` config > `info`.
+    /// Priority: `RUST_LOG` env var > `tuning.logging.log_level` config > `info`.
     pub fn init() {
         LOG_BUFFER.get_or_init(|| Mutex::new(Vec::new()));
         let level = std::env::var("RUST_LOG")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or_else(|| {
-                tuning().log_level.parse().unwrap_or(LevelFilter::Info)
+                tuning()
+                    .logging
+                    .log_level
+                    .parse()
+                    .unwrap_or(LevelFilter::Info)
             });
         log::set_logger(&LOGGER).ok();
         log::set_max_level(level);
@@ -63,15 +67,14 @@ impl Log for TuiLogger {
     }
 
     fn log(&self, record: &Record) {
-        if self.enabled(record.metadata()) {
-            if let Some(buf) = LOG_BUFFER.get() {
-                if let Ok(mut buf) = buf.lock() {
-                    buf.push(LogEntry {
-                        level: record.level(),
-                        message: record.args().to_string(),
-                    });
-                }
-            }
+        if self.enabled(record.metadata())
+            && let Some(buf) = LOG_BUFFER.get()
+            && let Ok(mut buf) = buf.lock()
+        {
+            buf.push(LogEntry {
+                level: record.level(),
+                message: record.args().to_string(),
+            });
         }
     }
 

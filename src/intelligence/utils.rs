@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs::DirEntry;
 use std::path::{Path, PathBuf};
 
 /// Parse simple YAML frontmatter delimited by `---`
@@ -7,6 +8,7 @@ use std::path::{Path, PathBuf};
 ///
 /// Key-value pairs from the frontmatter block. Empty map if no valid
 /// frontmatter is found.
+#[must_use]
 pub fn parse_frontmatter(text: &str) -> HashMap<String, String> {
     let mut meta = HashMap::new();
     if !text.starts_with("---") {
@@ -28,6 +30,7 @@ pub fn parse_frontmatter(text: &str) -> HashMap<String, String> {
 ///
 /// Returns the text after the closing `---`, or the original text
 /// if no frontmatter is present.
+#[must_use]
 pub fn extract_body(text: &str) -> String {
     if !text.starts_with("---") {
         return text.to_string();
@@ -55,26 +58,15 @@ pub struct DiscoveredFile {
 ///
 /// Each file is read and its frontmatter parsed. Files that cannot be
 /// read are silently skipped.
+#[must_use]
 pub fn discover_files(dir: &Path, ext: &str) -> Vec<DiscoveredFile> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut files: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|x| x == ext))
-        .collect();
-    files.sort_by_key(|e| e.file_name());
+    let mut files = read_dir_sorted(dir);
+    files.retain(|entry| entry.path().extension().is_some_and(|value| value == ext));
 
     files
         .into_iter()
-        .filter_map(|f| {
-            let content = std::fs::read_to_string(f.path()).ok()?;
-            let meta = parse_frontmatter(&content);
-            let name = f.path().file_stem()?.to_string_lossy().to_string();
-            Some(DiscoveredFile { name, meta, content, path: f.path() })
-        })
+        .map(|entry| entry.path())
+        .filter_map(read_discovered_file)
         .collect()
 }
 
@@ -82,27 +74,42 @@ pub fn discover_files(dir: &Path, ext: &str) -> Vec<DiscoveredFile> {
 ///
 /// Each subdirectory is checked for `filename`. If found, the file is read
 /// and its frontmatter parsed. Directories without the file are skipped.
+#[must_use]
 pub fn discover_subdirs(base: &Path, filename: &str) -> Vec<DiscoveredFile> {
-    let entries = match std::fs::read_dir(base) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut dirs: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .collect();
-    dirs.sort_by_key(|e| e.file_name());
+    let mut dirs = read_dir_sorted(base);
+    dirs.retain(|entry| entry.path().is_dir());
 
     dirs.into_iter()
-        .filter_map(|d| {
-            let file_path = d.path().join(filename);
-            let content = std::fs::read_to_string(&file_path).ok()?;
-            let meta = parse_frontmatter(&content);
-            let name = d.file_name().to_string_lossy().to_string();
-            Some(DiscoveredFile { name, meta, content, path: file_path })
+        .filter_map(|entry| {
+            let file_path = entry.path().join(filename);
+            read_discovered_file_at(entry.file_name().to_string_lossy().to_string(), file_path)
         })
         .collect()
+}
+
+fn read_dir_sorted(dir: &Path) -> Vec<DirEntry> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+    entries.sort_by_key(DirEntry::file_name);
+    entries
+}
+
+fn read_discovered_file(path: PathBuf) -> Option<DiscoveredFile> {
+    let name = path.file_stem()?.to_string_lossy().to_string();
+    read_discovered_file_at(name, path)
+}
+
+fn read_discovered_file_at(name: String, path: PathBuf) -> Option<DiscoveredFile> {
+    let content = std::fs::read_to_string(&path).ok()?;
+    Some(DiscoveredFile {
+        name,
+        meta: parse_frontmatter(&content),
+        content,
+        path,
+    })
 }
 
 #[cfg(test)]
@@ -125,10 +132,7 @@ mod tests {
 
     #[test]
     fn test_extract_body() {
-        assert_eq!(
-            extract_body("---\nk: v\n---\nBody here."),
-            "Body here."
-        );
+        assert_eq!(extract_body("---\nk: v\n---\nBody here."), "Body here.");
     }
 
     #[test]

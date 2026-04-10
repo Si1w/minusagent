@@ -26,6 +26,7 @@ pub struct BootstrapLoader {
 
 impl BootstrapLoader {
     /// Create a new loader for the given workspace directory
+    #[must_use]
     pub fn new(workspace_dir: &Path) -> Self {
         Self {
             workspace_dir: workspace_dir.to_path_buf(),
@@ -37,6 +38,7 @@ impl BootstrapLoader {
     /// # Returns
     ///
     /// Map of filename to (possibly truncated) content.
+    #[must_use]
     pub fn load_all(&self, mode: PromptMode) -> HashMap<String, String> {
         if mode == PromptMode::None {
             return HashMap::new();
@@ -57,12 +59,15 @@ impl BootstrapLoader {
                 _ => continue,
             };
 
-            let remaining = tuning().bootstrap_max_total_chars.saturating_sub(total);
+            let remaining = tuning()
+                .limits
+                .bootstrap_max_total_chars
+                .saturating_sub(total);
             if remaining == 0 {
                 break;
             }
 
-            let budget = remaining.min(tuning().bootstrap_max_file_chars);
+            let budget = remaining.min(tuning().limits.bootstrap_max_file_chars);
             let truncated = Self::truncate(&raw, budget);
             total += truncated.len();
             result.insert(name.to_string(), truncated);
