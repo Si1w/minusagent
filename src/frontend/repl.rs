@@ -620,63 +620,59 @@ fn render_service_statuses(statuses: &[ServiceStatus]) -> String {
 }
 
 const HELP_TEXT: &str = "\
-Sessions
-  /new <label>            New session
-  /save                   Save session
-  /load <label>           Load session
-  /list                   List sessions
-  /compact                Compact history
+## Sessions
 
-Intelligence
-  /prompt                 Show system prompt
-  /remember <name> <txt>  Save memory
-  /<skill> [args]         Invoke skill
+- `/new <label>` — new session
+- `/save` — save current session
+- `/load <label>` — load session
+- `/list` — list sessions
+- `/compact` — compact history
 
-Team
-  /team                   Show team roster
-  /inbox                  Check lead inbox
-  /tasks                  Show task board
-  /worktrees              List worktrees
-  /events                 Worktree event log
+## Intelligence
 
-Config
-  /llm                    List LLM profiles
-  /llm add                Add profile (interactive)
-  /llm rm <model>         Remove profile
-  /llm primary <model>    Set primary
+- `/prompt` — show system prompt
+- `/remember <name> <txt>` — save memory
+- `/<skill> [args]` — invoke skill
 
-Agents & Routing
-  /agents                 List agents
-  /switch <agent>         Switch agent
-  /switch off             Default routing
-  /bindings               List route bindings
-  /route <ch> <peer>      Test route resolution
+## Agents
 
-Resilience
-  /profiles               Show API key profiles
-  /lanes                  Show lane stats
+- `/agents` — list agents
+- `/switch <agent|off>` — switch agent (`off` = default routing)
+- `/bindings` — list route bindings
+- `/route <ch> <peer>` — test route resolution
 
-Scheduler
-  /heartbeat              Heartbeat status
-  /trigger                Manual heartbeat
-  /cron                   List cron jobs
-  /cron start             Start cron service
-  /cron stop              Stop cron service
-  /cron restart           Restart cron service
-  /cron trigger <id>      Trigger a cron job
-  /cron reload            Reload CRON.json
-  /delivery               Delivery queue stats
-  /delivery start         Start delivery runner
-  /delivery stop          Stop delivery runner
-  /delivery restart       Restart delivery runner
-  /services               Runtime service status
+## Team
 
-Gateways
-  /discord [start]        Start Discord bot
-  /discord stop           Stop Discord bot
-  /discord restart        Restart Discord bot
-  /gateway [start]        Start WebSocket API
-  /gateway stop           Stop WebSocket API
-  /gateway restart        Restart WebSocket API
+- `/team` — show team roster
+- `/inbox` — check lead inbox
+- `/tasks` — show task board
+- `/worktrees` — list worktrees
+- `/events` — worktree event log
 
-/help  /exit";
+## Config
+
+- `/llm [add|rm <model>|primary <model>]` — manage LLM profiles
+
+## Resilience
+
+- `/profiles` — show API key profiles
+- `/lanes` — show lane stats
+
+## Scheduler
+
+- `/heartbeat` — heartbeat status
+- `/trigger` — manual heartbeat
+- `/cron [start|stop|restart|trigger <id>|reload]` — cron service
+- `/delivery [start|stop|restart]` — delivery runner
+- `/services` — runtime service status
+
+## Gateways
+
+- `/discord [start|stop|restart]` — Discord bot
+- `/gateway [start|stop|restart]` — WebSocket API
+
+## Misc
+
+- `/help` — show this help
+- `/exit` — quit
+";
