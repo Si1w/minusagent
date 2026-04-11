@@ -6,8 +6,47 @@ Rust agent framework. Everything is a Node (`prep → exec → post`).
 
 ### Prerequisites
 
-- Rust (edition 2024)
 - An OpenAI-compatible LLM API endpoint
+- Rust (edition 2024) — only required if building from source
+
+### Install
+
+Pick a directory to install into (e.g. `~/minusagent`), download the prebuilt binary, and add that directory to your `PATH`:
+
+```bash
+mkdir -p ~/minusagent && cd ~/minusagent
+
+# macOS (Apple Silicon)
+curl -L https://github.com/Si1w/minusagent/releases/latest/download/minusagent-aarch64-apple-darwin.tar.gz | tar xz
+
+# macOS (Intel)
+curl -L https://github.com/Si1w/minusagent/releases/latest/download/minusagent-x86_64-apple-darwin.tar.gz | tar xz
+
+# Linux (x86_64)
+curl -L https://github.com/Si1w/minusagent/releases/latest/download/minusagent-x86_64-unknown-linux-gnu.tar.gz | tar xz
+
+# Export the install directory to PATH (persist it in your shell config)
+echo 'export PATH="$HOME/minusagent:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+Then run from anywhere:
+
+```bash
+minusagent
+```
+
+For Windows, grab the `.zip` from the [latest release](https://github.com/Si1w/minusagent/releases/latest) page and add the extracted folder to your `PATH`.
+
+On macOS you may need to allow the binary in System Settings → Privacy & Security the first time it runs.
+
+### Build from source
+
+```bash
+cargo run --release
+```
+
+This launches the TUI (ratatui-based terminal interface). Type messages to chat with the agent.
 
 ### Configuration
 
@@ -33,38 +72,6 @@ API keys support `$ENV_VAR` syntax — the value is resolved from your shell env
 | `[frontend.websocket]` | No | WebSocket gateway host and port |
 | `[services.*]` | No | Per-service autostart policy (`cron`, `delivery`, `discord`, `websocket`) |
 | `[tuning.*]` | No | Runtime-tunable parameters (all have sensible defaults) |
-
-### Install
-
-Download the prebuilt binary for your platform with one command:
-
-```bash
-# macOS (Apple Silicon)
-curl -L https://github.com/Si1w/minusagent/releases/latest/download/minusagent-aarch64-apple-darwin.tar.gz | tar xz
-
-# macOS (Intel)
-curl -L https://github.com/Si1w/minusagent/releases/latest/download/minusagent-x86_64-apple-darwin.tar.gz | tar xz
-
-# Linux (x86_64)
-curl -L https://github.com/Si1w/minusagent/releases/latest/download/minusagent-x86_64-unknown-linux-gnu.tar.gz | tar xz
-
-# Run it
-./minusagent
-```
-
-For Windows, grab the `.zip` from the [latest release](https://github.com/Si1w/minusagent/releases/latest) page.
-
-On macOS you may need to allow the binary in System Settings → Privacy & Security the first time it runs.
-
-### Build from source
-
-Requires Rust (edition 2024).
-
-```bash
-cargo run --release
-```
-
-This launches the TUI (ratatui-based terminal interface). Type messages to chat with the agent.
 
 ## Workspace Setup
 
